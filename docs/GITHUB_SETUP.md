@@ -67,8 +67,9 @@ including runtime/verifier identities, so changing approval creates new evidence
 The webhook service only validates and persists events. It does not spawn a
 background agent or accept shell commands. It binds loopback; supply an
 operator-managed HTTPS reverse proxy before GitHub can deliver events. This task
-does not provision one. The health route reveals no repository data; case and
-artifact routes await M4 authentication.
+does not provision one. The health route reveals no repository data. M4 adds
+authenticated case and projected-evidence routes; activate them separately using
+[WEB_SETUP.md](WEB_SETUP.md). `github-serve` alone does not enable web login.
 
 ```powershell
 .venv\Scripts\python.exe -I -m firstrun github-serve --config C:\FirstRunPrivate\github.json --database .local\firstrun.sqlite

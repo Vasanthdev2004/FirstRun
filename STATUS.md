@@ -1,11 +1,12 @@
 # Implementation status — observed evidence only
 
 **Last authored:** 2026-09-10.  
-**Current checkpoint:** M3 GitHub implementation slice present at the owner's
-request to continue development. M2 acceptance/live provider validation and the
-real installed-App M3 workflow remain unaccepted; full tests are deferred.
-**Product target:** web app + GitHub App; the current local CLI/worker is the trusted
-engine slice, not the end-user product.
+**Current checkpoint:** M4 local web implementation is present at the owner's
+request to continue development. M2 acceptance/live provider validation, the real
+installed-App M3 workflow and live-configured M4 acceptance remain outstanding.
+Full Docker/provider/App tests are deferred, not passed.
+**Product target:** web app + GitHub App; Next.js now fronts the existing trusted
+Python controller, with execution kept in the separate worker.
 
 | Capability | State | Evidence |
 |---|---|---|
@@ -21,7 +22,7 @@ engine slice, not the end-user product.
 | M1 evidence and cleanup | Implemented | Typed evidence binds commit/tree, source archive, candidate patch/tree, target, recipe, README, verifier, policy, runtime digests, commands, observations, identities, and cleanup; leaked owned resources quarantine the endpoint |
 | M2 Strands repair loop | Implemented; acceptance pending | `repair-local` now performs baseline capture, bounded Strands investigation, controller-rendered recipe/README candidate construction, investigation teardown, and independent proof. Fake agents are test-only and cannot produce live milestone evidence |
 | M3 GitHub workflow | Implemented local integration slice; live activation/acceptance pending | Signed selected-repo push ingress, SQLite dedupe/leases/write journal, content-addressed artifacts, exact-SHA source fetch, bounded worker, exact-commit fresh verification, reconciled PR/check publisher. No live App/webhook/repair PR/check used yet; never auto-merge |
-| M4 web product | Not implemented | No UI/backend product workflow yet |
+| M4 web product | Local implementation and focused build checks; live acceptance pending | Next.js repository/contract/case views, authenticated projected evidence, OAuth sessions, versioned run/cancel/recheck actions; real unconfigured desktop/mobile UI inspected |
 | M5 hosted execution | Not implemented | No cloud resources provisioned |
 
 ## M1 acceptance coverage
@@ -150,10 +151,80 @@ No fixture application scripts ran on the host, no containers were launched, no
 real credential contents were inspected, and no AWS calls or runtime GitHub App writes occurred
 during this slice. Development repository pushes use Vasanthdev2004's account.
 
+## M4 implementation evidence
+
+- `apps/web` is a pinned Next.js 16.3.4 / React 19.3.0 / TypeScript 7.0.2 app.
+  It displays repository default-branch health separately from repair status,
+  approved target/recipe/README, case history, selected execution stages, bounded
+  logs, candidate diff, proof identities, and reconciled GitHub links. There is
+  no demo login, invented repository row or sample passing run.
+- `backend/firstrun/web_auth.py` implements GitHub App user OAuth with one-use
+  state, browser binding, S256 PKCE, exact repository/user permission checks and
+  opaque one-hour server sessions. GitHub user tokens are not persisted or sent
+  to the browser/model. Every API read rechecks current repository permission;
+  writes require write/admin, exact Origin and a session CSRF nonce.
+- `web_service.py` projects only case-bound browser DTOs from existing SQLite and
+  artifact storage. Evidence is rebound to exact case/source/approval identities;
+  raw provider configuration, tool payloads, credentials and private reasoning
+  are not public artifacts. `domain/web.py` and `domain/web_session.py` generate
+  the shared frontend types through `tools/export_web_types.py`.
+- `web_api.py` adds authenticated repository/case/evidence routes and bounded
+  mutation bodies. UUID request identities support retry dedupe. Human decisions
+  bind repository, SHA and current version; conflicts do not alter stale cases.
+  Store migration adds version/decision bookkeeping without replacing old data.
+- `web-serve` supports a fail-closed unconfigured setup surface. Next proxies
+  same-origin `/api/*` to the private API; neither process starts the worker.
+  Operator startup and OAuth configuration are documented in `docs/WEB_SETUP.md`.
+- Cancellation is immediate for queued cases and cooperative at bounded phase
+  boundaries for active cases. Successful cancellation requires confirmed cleanup;
+  missing/failed cleanup stays interrupted/quarantined. Publication/reconciliation
+  rejects new UI cancellation requests. This **does not yet meet SECURITY.md's
+  stronger immediate run-owned active-process kill requirement**. That requirement
+  is preserved, not weakened or claimed as accepted.
+- Owner approval remains the private operator registration from M3, displayed
+  read-only in the web app. An in-browser target/initial-recipe approval workflow
+  is not implemented. NeedsInput supports explicit external resolution followed
+  by a new case, or cancellation; it is not a secret broker or target editor.
+
+### Commands observed for this slice
+
+- `npm install --ignore-scripts` in `apps/web`: exit 0, 28 packages installed;
+  npm reported 0 audit vulnerabilities. No backend dependency pins changed.
+- `npm run typecheck`: exit 0. `NEXT_TELEMETRY_DISABLED=1 npm run build` (PowerShell
+  environment assignment): exit 0, all three page routes compiled successfully.
+- `.venv\Scripts\python.exe -I tools/export_web_types.py --check apps/web/src/lib/api-types.ts`:
+  exit 0; generated public types match the Pydantic contracts.
+- `.venv\Scripts\python.exe -I -m compileall -q backend/firstrun`: exit 0.
+- `.venv\Scripts\python.exe -I -m unittest discover -s tests -p 'test_m3_*.py' -q`:
+  exit 0, all 33 existing offline M3 regressions passed. The existing
+  Starlette/AnyIO deprecation warning remains non-failing.
+- `.venv\Scripts\python.exe -I -m unittest discover -s tests -p 'test_m4_*.py' -q`:
+  exit 0, 21 focused tests passed, no skips. Covers OAuth/session/permission/CSRF,
+  authenticated API/body bounds, cleanup-aware cancellation, typed source-bound
+  projections and stale/idempotent decisions. An initial discovery-import error
+  in the new service test was fixed without changing acceptance expectations.
+- First `web-serve --database .local/m4-preview.sqlite` attempt was blocked because
+  the parent directory did not exist (typed policy-blocked response). Created only
+  the workspace `.local` directory, then the same command started successfully on
+  loopback port 8765. No credentials were configured or read.
+- `npm run dev` started on loopback port 3000. Browser loaded the real API-backed
+  unconfigured screen. Check connection retained the correct unconfigured state;
+  developer warnings/errors were empty. Desktop 1280x720 and mobile 390x844 had
+  no page overflow and visible keyboard focus. Independent visual review: PASS
+  for this unconfigured surface only. Authenticated views were not visually
+  verified. `DESIGN.md` captures the implemented system; no shipping raster assets.
+- Impeccable's one scoped mechanical detector run returned `[]`, exit 0.
+  `git diff --check` exited 0. Newly auto-generated Next agent instruction files
+  were removed and their generation disabled; root `AGENTS.md` is unchanged.
+
+No fixture scripts ran on the host; no containers, provider calls, real OAuth
+exchange, runtime App writes, cloud provisioning or deployment occurred. Local
+UI preview is development evidence, not proof of the complete FirstRun workflow.
+
 ## Next single task
 
-Review this M3 implementation checkpoint and supply the owner-approved App/demo
-repository/provider configuration when ready for live activation. The M2 and M3
-acceptance gates remain outstanding even though development continued at the
-owner's request. Do not describe the workflow as live or accepted until the actual
-provider and App round trip pass. M4 frontend and M5/M6 work have not started.
+Review the M4 implementation checkpoint. Live activation still requires the
+owner-approved demo repository, App/OAuth configuration and provider authority.
+M5 deployment needs an explicit hosting/security/spend choice before provisioning.
+Do not describe M2/M3/M4 as accepted until their outstanding real acceptance checks
+and the noted M4 gaps are addressed. M5/M6 have not been scaffolded.

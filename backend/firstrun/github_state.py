@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
@@ -100,6 +101,19 @@ _TERMINAL_PHASES = frozenset(
     }
 )
 _RECOVERY_BLOCKING_PHASES = frozenset({"interrupted", "quarantined"})
+_CANCELLABLE_PHASES = frozenset(
+    {
+        "queued",
+        "fetching",
+        "baseline_running",
+        "investigating",
+        "needs_input",
+        "proof_running",
+        "verified",
+        "repair_ready",
+    }
+)
+_RECHECKABLE_PHASES = frozenset({"needs_input", "blocked", "unresolved"})
 _UNSET = object()
 
 
@@ -265,6 +279,54 @@ class SQLiteStore:
             self._recover_expired(connection)
             return self._enqueue(connection, registration, sha)
 
+    def enqueue_manual(
+        self, registration: RepositoryRegistration, sha: str, request_id: str
+    ) -> str:
+        """Enqueue an explicit run without collapsing separate same-SHA requests."""
+
+        _require_sha(sha)
+        _require_request_id(request_id)
+        if not isinstance(registration, RepositoryRegistration):
+            raise TypeError("registration must be RepositoryRegistration")
+        with self._transaction() as connection:
+            self._recover_expired(connection)
+            existing = connection.execute(
+                "SELECT * FROM manual_requests WHERE repository_id = ? AND request_id = ?",
+                (registration.repository_id, request_id),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing["sha"]) != sha
+                    or str(existing["registration_fingerprint"])
+                    != registration.fingerprint
+                ):
+                    raise GitHubStateError(
+                        "manual request identifier is bound to another run"
+                    )
+                return str(existing["case_id"])
+            case_id = self._enqueue(
+                connection,
+                registration,
+                sha,
+                rerun_identity=request_id,
+                event_kind="manual_enqueued",
+                event_payload={"request_id": request_id},
+            )
+            connection.execute(
+                """INSERT INTO manual_requests
+                   (repository_id, request_id, sha, registration_fingerprint,
+                    case_id, created_at) VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    registration.repository_id,
+                    request_id,
+                    sha,
+                    registration.fingerprint,
+                    case_id,
+                    self._now(),
+                ),
+            )
+            return case_id
+
     def ingest_delivery(
         self,
         provider: str,
@@ -420,8 +482,8 @@ class SQLiteStore:
             merged.update(delta)
             encoded = _encode_object(merged)
             connection.execute(
-                "UPDATE cases SET phase = ?, payload_json = ?, updated_at = ? "
-                "WHERE case_id = ?",
+                "UPDATE cases SET phase = ?, payload_json = ?, version = version + 1, "
+                "updated_at = ? WHERE case_id = ?",
                 (phase, encoded, now, case_id),
             )
             self._event(connection, case_id, "phase_updated", phase, delta)
@@ -445,7 +507,8 @@ class SQLiteStore:
             merged.update(delta)
             connection.execute(
                 """UPDATE cases SET phase = ?, payload_json = ?, lease_owner = NULL,
-                   lease_expires_at = NULL, updated_at = ? WHERE case_id = ?""",
+                   lease_expires_at = NULL, version = version + 1, updated_at = ?
+                   WHERE case_id = ?""",
                 (phase, _encode_object(merged), now, case_id),
             )
             self._event(connection, case_id, "finished", phase, delta)
@@ -463,7 +526,8 @@ class SQLiteStore:
                 phase = "reconcile_pending"
             connection.execute(
                 """UPDATE cases SET phase = ?, lease_owner = NULL,
-                   lease_expires_at = NULL, updated_at = ? WHERE case_id = ?""",
+                   lease_expires_at = NULL, version = version + 1, updated_at = ?
+                   WHERE case_id = ?""",
                 (phase, now, case_id),
             )
             self._event(connection, case_id, "lease_released", phase, {})
@@ -577,11 +641,74 @@ class SQLiteStore:
             ).fetchone()
             return _case_from_row(row) if row is not None else None
 
-    def get_events(self, case_id: str) -> tuple[dict[str, object], ...]:
+    def list_cases(
+        self,
+        repository_id: int,
+        *,
+        before_case_id: str | None = None,
+        limit: int = 20,
+    ) -> tuple[dict[str, object], ...]:
+        """List one repository's cases newest-first using an opaque case cursor."""
+
+        _require_positive_id(repository_id, "repository_id")
+        if type(limit) is not int or not 1 <= limit <= 101:
+            raise ValueError("case page limit must be between 1 and 101")
         with self._connect() as connection:
+            parameters: list[object] = [repository_id]
+            cursor_clause = ""
+            if before_case_id is not None:
+                cursor = connection.execute(
+                    "SELECT created_at, case_id FROM cases WHERE repository_id = ? "
+                    "AND case_id = ?",
+                    (repository_id, before_case_id),
+                ).fetchone()
+                if cursor is None:
+                    raise GitHubStateError("case cursor does not exist in repository")
+                cursor_clause = (
+                    " AND (created_at < ? OR (created_at = ? AND case_id < ?))"
+                )
+                parameters.extend(
+                    [int(cursor["created_at"]), int(cursor["created_at"]), before_case_id]
+                )
+            parameters.append(limit)
             rows = connection.execute(
-                "SELECT * FROM case_events WHERE case_id = ? ORDER BY event_id",
-                (case_id,),
+                "SELECT * FROM cases WHERE repository_id = ?"
+                + cursor_clause
+                + " ORDER BY created_at DESC, case_id DESC LIMIT ?",
+                parameters,
+            ).fetchall()
+        return tuple(_case_from_row(row) for row in rows)
+
+    def get_events(
+        self,
+        case_id: str,
+        *,
+        repository_id: int | None = None,
+        after_event_id: int = 0,
+        limit: int | None = None,
+    ) -> tuple[dict[str, object], ...]:
+        if repository_id is not None:
+            _require_positive_id(repository_id, "repository_id")
+        if type(after_event_id) is not int or after_event_id < 0:
+            raise ValueError("event cursor must be a non-negative integer")
+        if limit is not None and (type(limit) is not int or not 1 <= limit <= 101):
+            raise ValueError("event page limit must be between 1 and 101")
+        with self._connect() as connection:
+            if repository_id is not None:
+                scoped = connection.execute(
+                    "SELECT 1 FROM cases WHERE case_id = ? AND repository_id = ?",
+                    (case_id, repository_id),
+                ).fetchone()
+                if scoped is None:
+                    raise GitHubStateError("case does not exist in repository")
+            suffix = " LIMIT ?" if limit is not None else ""
+            parameters: list[object] = [case_id, after_event_id]
+            if limit is not None:
+                parameters.append(limit)
+            rows = connection.execute(
+                "SELECT * FROM case_events WHERE case_id = ? AND event_id > ? "
+                "ORDER BY event_id" + suffix,
+                parameters,
             ).fetchall()
         return tuple(
             {
@@ -594,6 +721,170 @@ class SQLiteStore:
             }
             for row in rows
         )
+
+    def cancel_case(
+        self,
+        repository_id: int,
+        case_id: str,
+        *,
+        sha: str,
+        expected_version: int,
+        request_id: str,
+    ) -> dict[str, object]:
+        """Persist an immediate cancellation or an active-run stop request."""
+
+        _require_positive_id(repository_id, "repository_id")
+        _require_sha(sha)
+        _require_version(expected_version)
+        _require_request_id(request_id)
+        now = self._now()
+        with self._transaction() as connection:
+            self._recover_expired(connection)
+            replay = self._decision_replay(
+                connection,
+                repository_id,
+                request_id,
+                action="cancel",
+                case_id=case_id,
+                sha=sha,
+                expected_version=expected_version,
+            )
+            if replay is not None:
+                return replay
+            row = self._require_case_version(
+                connection, repository_id, case_id, sha, expected_version
+            )
+            phase = str(row["phase"])
+            if phase in {"publishing", "reconcile_pending"}:
+                raise GitHubStateError(
+                    "cannot add a cancellation while external writes may need reconciliation"
+                )
+            if phase not in _CANCELLABLE_PHASES:
+                raise GitHubStateError("case phase does not accept cancellation")
+            payload = _decode_object(str(row["payload_json"]))
+            if payload.get("cancellation_requested") is True:
+                raise GitHubStateError("case already has a cancellation request")
+            payload.update(
+                {
+                    "cancellation_requested": True,
+                    "cancellation_request_id": request_id,
+                    "cancellation_requested_at": now,
+                }
+            )
+            actively_executing = (
+                row["lease_owner"] is not None
+                and phase
+                in {"fetching", "baseline_running", "investigating", "proof_running", "repair_ready"}
+            )
+            next_phase = phase if actively_executing else "cancelled"
+            connection.execute(
+                """UPDATE cases SET phase = ?, payload_json = ?, version = version + 1,
+                   lease_owner = CASE WHEN ? THEN lease_owner ELSE NULL END,
+                   lease_expires_at = CASE WHEN ? THEN lease_expires_at ELSE NULL END,
+                   updated_at = ? WHERE case_id = ?""",
+                (
+                    next_phase,
+                    _encode_object(payload),
+                    actively_executing,
+                    actively_executing,
+                    now,
+                    case_id,
+                ),
+            )
+            self._event(
+                connection,
+                case_id,
+                "cancellation_requested" if actively_executing else "cancelled",
+                next_phase,
+                {"request_id": request_id},
+            )
+            self._record_decision(
+                connection,
+                repository_id,
+                request_id,
+                case_id,
+                sha,
+                expected_version,
+                "cancel",
+                case_id,
+                now,
+            )
+            return self._get_case(connection, case_id)
+
+    def recheck_case(
+        self,
+        registration: RepositoryRegistration,
+        case_id: str,
+        *,
+        sha: str,
+        expected_version: int,
+        request_id: str,
+        current_sha: str,
+    ) -> dict[str, object]:
+        """Record a versioned decision and enqueue a fresh exact-head run."""
+
+        if not isinstance(registration, RepositoryRegistration):
+            raise TypeError("registration must be RepositoryRegistration")
+        _require_sha(sha)
+        _require_sha(current_sha)
+        _require_version(expected_version)
+        _require_request_id(request_id)
+        now = self._now()
+        repository_id = registration.repository_id
+        with self._transaction() as connection:
+            self._recover_expired(connection)
+            replay = self._decision_replay(
+                connection,
+                repository_id,
+                request_id,
+                action="recheck",
+                case_id=case_id,
+                sha=sha,
+                expected_version=expected_version,
+            )
+            if replay is not None:
+                return replay
+            row = self._require_case_version(
+                connection, repository_id, case_id, sha, expected_version
+            )
+            phase = str(row["phase"])
+            if phase in {"publishing", "reconcile_pending"}:
+                raise GitHubStateError(
+                    "cannot recheck while external writes may need reconciliation"
+                )
+            if phase not in _RECHECKABLE_PHASES:
+                raise GitHubStateError("case phase does not accept recheck")
+            replacement = self._enqueue(
+                connection,
+                registration,
+                current_sha,
+                rerun_identity="recheck:" + request_id,
+                event_kind="recheck_enqueued",
+                event_payload={"request_id": request_id, "source_case_id": case_id},
+            )
+            connection.execute(
+                "UPDATE cases SET version = version + 1, updated_at = ? WHERE case_id = ?",
+                (now, case_id),
+            )
+            self._event(
+                connection,
+                case_id,
+                "recheck_requested",
+                phase,
+                {"request_id": request_id, "replacement_case_id": replacement},
+            )
+            self._record_decision(
+                connection,
+                repository_id,
+                request_id,
+                case_id,
+                sha,
+                expected_version,
+                "recheck",
+                replacement,
+                now,
+            )
+            return self._get_case(connection, replacement)
 
     def get_journal(self, case_id: str, key: str) -> dict[str, object] | None:
         with self._connect() as connection:
@@ -674,17 +965,22 @@ class SQLiteStore:
         connection: sqlite3.Connection,
         registration: RepositoryRegistration,
         sha: str,
+        *,
+        rerun_identity: str | None = None,
+        event_kind: str = "enqueued",
+        event_payload: Mapping[str, object] | None = None,
     ) -> str:
         if not isinstance(registration, RepositoryRegistration):
             raise TypeError("registration must be RepositoryRegistration")
-        logical_key = _digest_json(
-            {
-                "provider": "github",
-                "repository_id": registration.repository_id,
-                "sha": sha,
-                "registration_fingerprint": registration.fingerprint,
-            }
-        )
+        identity: dict[str, object] = {
+            "provider": "github",
+            "repository_id": registration.repository_id,
+            "sha": sha,
+            "registration_fingerprint": registration.fingerprint,
+        }
+        if rerun_identity is not None:
+            identity["rerun_identity"] = rerun_identity
+        logical_key = _digest_json(identity)
         existing = connection.execute(
             "SELECT case_id FROM cases WHERE logical_key = ?", (logical_key,)
         ).fetchone()
@@ -699,7 +995,8 @@ class SQLiteStore:
         for stale in stale_rows:
             stale_id = str(stale["case_id"])
             connection.execute(
-                "UPDATE cases SET phase = 'stale', updated_at = ? WHERE case_id = ?",
+                "UPDATE cases SET phase = 'stale', version = version + 1, "
+                "updated_at = ? WHERE case_id = ?",
                 (now, stale_id),
             )
             self._event(connection, stale_id, "superseded", "stale", {"new_sha": sha})
@@ -707,8 +1004,9 @@ class SQLiteStore:
         connection.execute(
             """INSERT INTO cases
                (case_id, logical_key, repository_id, sha, registration_json, phase,
-                payload_json, lease_owner, lease_expires_at, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, 'queued', '{}', NULL, NULL, ?, ?)""",
+                payload_json, lease_owner, lease_expires_at, version, created_at,
+                updated_at)
+               VALUES (?, ?, ?, ?, ?, 'queued', '{}', NULL, NULL, 1, ?, ?)""",
             (
                 case_id,
                 logical_key,
@@ -719,8 +1017,86 @@ class SQLiteStore:
                 now,
             ),
         )
-        self._event(connection, case_id, "enqueued", "queued", {"sha": sha})
+        created_event: dict[str, object] = {"sha": sha}
+        created_event.update(_json_object(event_payload or {}))
+        self._event(connection, case_id, event_kind, "queued", created_event)
         return case_id
+
+    def _require_case_version(
+        self,
+        connection: sqlite3.Connection,
+        repository_id: int,
+        case_id: str,
+        sha: str,
+        expected_version: int,
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            "SELECT * FROM cases WHERE case_id = ? AND repository_id = ?",
+            (case_id, repository_id),
+        ).fetchone()
+        if row is None:
+            raise GitHubStateError("case does not exist in repository")
+        if str(row["sha"]) != sha:
+            raise GitHubStateError("decision SHA does not match the case")
+        if int(row["version"]) != expected_version:
+            raise GitHubStateError("decision version is stale")
+        return row
+
+    def _decision_replay(
+        self,
+        connection: sqlite3.Connection,
+        repository_id: int,
+        request_id: str,
+        *,
+        action: str,
+        case_id: str,
+        sha: str,
+        expected_version: int,
+    ) -> dict[str, object] | None:
+        row = connection.execute(
+            "SELECT * FROM case_decisions WHERE repository_id = ? AND request_id = ?",
+            (repository_id, request_id),
+        ).fetchone()
+        if row is None:
+            return None
+        if (
+            str(row["action"]) != action
+            or str(row["case_id"]) != case_id
+            or str(row["sha"]) != sha
+            or int(row["expected_version"]) != expected_version
+        ):
+            raise GitHubStateError("decision request is bound to another operation")
+        result_id = str(row["result_case_id"])
+        return self._get_case(connection, result_id)
+
+    def _record_decision(
+        self,
+        connection: sqlite3.Connection,
+        repository_id: int,
+        request_id: str,
+        case_id: str,
+        sha: str,
+        expected_version: int,
+        action: str,
+        result_case_id: str,
+        now: int,
+    ) -> None:
+        connection.execute(
+            """INSERT INTO case_decisions
+               (repository_id, request_id, case_id, sha, expected_version, action,
+                result_case_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                repository_id,
+                request_id,
+                case_id,
+                sha,
+                expected_version,
+                action,
+                result_case_id,
+                now,
+            ),
+        )
 
     def _recover_expired(self, connection: sqlite3.Connection) -> None:
         now = self._now()
@@ -742,7 +1118,8 @@ class SQLiteStore:
             case_id = str(row["case_id"])
             connection.execute(
                 """UPDATE cases SET phase = ?, lease_owner = NULL,
-                   lease_expires_at = NULL, updated_at = ? WHERE case_id = ?""",
+                   lease_expires_at = NULL, version = version + 1, updated_at = ?
+                   WHERE case_id = ?""",
                 (recovered, now, case_id),
             )
             self._event(
@@ -871,6 +1248,7 @@ class SQLiteStore:
                 payload_json TEXT NOT NULL,
                 lease_owner TEXT,
                 lease_expires_at INTEGER,
+                version INTEGER NOT NULL DEFAULT 1,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 CHECK ((lease_owner IS NULL) = (lease_expires_at IS NULL))
@@ -922,10 +1300,38 @@ class SQLiteStore:
                 outcome TEXT,
                 updated_at INTEGER NOT NULL
             )""",
+            """CREATE TABLE IF NOT EXISTS manual_requests (
+                repository_id INTEGER NOT NULL,
+                request_id TEXT NOT NULL,
+                sha TEXT NOT NULL,
+                registration_fingerprint TEXT NOT NULL,
+                case_id TEXT NOT NULL REFERENCES cases(case_id),
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (repository_id, request_id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS case_decisions (
+                repository_id INTEGER NOT NULL,
+                request_id TEXT NOT NULL,
+                case_id TEXT NOT NULL REFERENCES cases(case_id),
+                sha TEXT NOT NULL,
+                expected_version INTEGER NOT NULL,
+                action TEXT NOT NULL CHECK (action IN ('cancel', 'recheck')),
+                result_case_id TEXT NOT NULL REFERENCES cases(case_id),
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (repository_id, request_id)
+            )""",
         )
         with self._transaction() as connection:
             for statement in statements:
                 connection.execute(statement)
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(cases)").fetchall()
+            }
+            if "version" not in columns:
+                connection.execute(
+                    "ALTER TABLE cases ADD COLUMN version INTEGER NOT NULL DEFAULT 1"
+                )
 
 
 def protected_source_digest(files: Mapping[str, bytes]) -> str:
@@ -963,6 +1369,22 @@ def _require_sha(value: object) -> None:
 def _require_positive_id(value: object, name: str) -> None:
     if type(value) is not int or not 1 <= value <= 2**63 - 1:
         raise ValueError(f"{name} must be a positive integer")
+
+
+def _require_version(value: object) -> None:
+    if type(value) is not int or value < 1:
+        raise ValueError("expected_version must be a positive integer")
+
+
+def _require_request_id(value: object) -> None:
+    if not isinstance(value, str):
+        raise ValueError("request_id must be a canonical UUIDv4")
+    try:
+        parsed = UUID(value)
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("request_id must be a canonical UUIDv4") from exc
+    if parsed.version != 4 or str(parsed) != value:
+        raise ValueError("request_id must be a canonical UUIDv4")
 
 
 def _require_phase(value: object) -> None:
@@ -1041,6 +1463,7 @@ def _case_from_row(row: sqlite3.Row) -> dict[str, object]:
         "payload": _decode_object(str(row["payload_json"])),
         "lease_owner": row["lease_owner"],
         "lease_expires_at": row["lease_expires_at"],
+        "version": int(row["version"]),
         "created_at": int(row["created_at"]),
         "updated_at": int(row["updated_at"]),
     }

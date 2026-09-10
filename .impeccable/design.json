@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-10T15:36:01Z",
+  "title": "FirstRun design system",
+  "extensions": {
+    "shadows": [{"name":"primary-control","value":"0 1px 2px #1e3a7420","purpose":"Subtle primary button separation."}],
+    "motion": [],
+    "breakpoints": [{"name":"compact","value":"1250px"},{"name":"icon-rail","value":"950px"},{"name":"mobile","value":"700px"}]
+  },
+  "components": [
+    {"name":"Primary button","kind":"button","refersTo":"button-primary","description":"The relevant operation.","html":"<button class=\"ds-primary\">Run setup check</button>","css":".ds-primary{background:var(--blue,#244fc7);color:white;border:1px solid transparent;border-radius:5px;padding:8px 14px;min-height:38px;font:600 12px Segoe UI,sans-serif}.ds-primary:hover{background:var(--blue-hover,#1c3fa3)}.ds-primary:focus-visible{outline:2px solid #244fc7;outline-offset:4px}"},
+    {"name":"Secondary button","kind":"button","refersTo":"button-secondary","description":"Refresh or inspect without creating work.","html":"<button class=\"ds-secondary\">Check connection</button>","css":".ds-secondary{background:white;color:#424b5b;border:1px solid #c6ceda;border-radius:5px;padding:8px 14px;min-height:38px;font:600 12px Segoe UI,sans-serif}.ds-secondary:hover{background:#eef1f6}.ds-secondary:focus-visible{outline:2px solid #244fc7;outline-offset:4px}"},
+    {"name":"Repository navigation","kind":"nav","description":"Persistent selected destination.","html":"<a class=\"ds-nav\" href=\"#\" aria-current=\"page\">Repositories</a>","css":".ds-nav{display:block;background:#e3e9f5;color:#244583;padding:11px 12px;border-radius:5px;text-decoration:none;font:600 13px Segoe UI,sans-serif}.ds-nav:hover{background:#d9e2f3}.ds-nav:focus-visible{outline:2px solid #244fc7;outline-offset:4px}"},
+    {"name":"Observed status","kind":"chip","description":"Written status always accompanies color.","html":"<span class=\"ds-status\"><span aria-hidden=\"true\"></span>Not checked</span>","css":".ds-status{display:inline-flex;align-items:center;gap:6px;color:#667183;font:600 11px Segoe UI,sans-serif}.ds-status>span{width:6px;height:6px;background:currentColor;border-radius:50%}"},
+    {"name":"Evidence ledger","kind":"card","description":"Flat grouped operational data.","html":"<section class=\"ds-ledger\"><h3>Default branch</h3><p>No recorded verification</p></section>","css":".ds-ledger{background:white;border:1px solid #e0e4eb;border-radius:6px;padding:23px 26px;color:#202632;font:12px Segoe UI,sans-serif}.ds-ledger h3{font-size:12px;margin:0 0 13px}.ds-ledger p{font-size:11px;color:#636c7c;margin:0}"}
+  ],
+  "narrative": {
+    "northStar": "The execution score",
+    "overview": "A quiet, compact workspace where the selected execution stage and its exact evidence stay together.",
+    "keyCharacteristics": ["Revision-bound","Readable","Flat by default"],
+    "rules": [],
+    "dos": ["Do keep the tested revision and proof provenance inspectable.","Do preserve reduced-motion behavior and visible keyboard focus.","Do separate default-branch health from repair evidence."],
+    "donts": ["Don't invent repository rows, metrics, progress or success labels.","Don't add decorative imagery to operational evidence.","Don't turn a proof panel green from HTTP readiness or a model response alone."]
+  }
+}

@@ -20,7 +20,7 @@ from uuid import uuid4
 from firstrun.artifacts import ArtifactStore
 
 from firstrun.domain.contracts import Recipe
-from firstrun.domain.evidence import ContentDigest, RunEvidence
+from firstrun.domain.evidence import CleanupEvidence, ContentDigest, RunEvidence
 from firstrun.domain.repair import AgentRunEvidence, RepairProviderConfig
 from firstrun.github_state import GitHubConfig, RepositoryRegistration, SQLiteStore
 from firstrun.integrations.github import (
@@ -39,6 +39,10 @@ class PublicationBlocked(RuntimeError):
 
 class ReconciliationPending(RuntimeError):
     """A possibly completed non-idempotent write needs read-only reconciliation."""
+
+
+class CancellationRequested(RuntimeError):
+    """The persisted stop flag is observed at a safe controller boundary."""
 
 
 def make_client(config: GitHubConfig) -> GitHubClient:
@@ -66,9 +70,28 @@ def process_one(
     artifacts = ArtifactStore(artifact_root)
     publisher = Publisher(client, store, registration, case_id, owner, artifacts)
     execution_started = False
+    cleanup_confirmed = True
+
+    def check_cancel() -> None:
+        current = store.get_case(case_id)
+        if current and current["payload"].get("cancellation_requested"):
+            raise CancellationRequested()
+
+    def finish_cancel() -> None:
+        store.finish(case_id, owner, "cancelled" if cleanup_confirmed else "interrupted", {
+            "message": ("Cancelled at a safe phase boundary; run-owned cleanup confirmed."
+                        if cleanup_confirmed else
+                        "Cancellation requested; cleanup is unconfirmed and execution is quarantined.")
+        })
 
     def observe(event: str, payload: dict[str, object]) -> None:
-        nonlocal execution_started
+        nonlocal execution_started, cleanup_confirmed
+        if event.endswith("_running"):
+            # Before the observer returns no resources for this phase exist.
+            check_cancel()
+            cleanup_confirmed = False
+        elif event.endswith("_completed"):
+            cleanup_confirmed = _completed_cleanup_succeeded(payload)
         execution_started = True
         # Event namespaces cannot bypass the conservative restart quarantine.
         phase = "investigating" if "investigation" in event else "proof_running"
@@ -78,6 +101,7 @@ def process_one(
         reference = artifacts.put(payload)
         store.update_case(case_id, owner, phase, {"worker_event": event,
                          "worker_binding": payload.get("binding"), "worker_artifact": reference})
+        check_cancel()
 
     try:
         if case["registration"] != registration.model_dump(mode="json"):
@@ -86,6 +110,7 @@ def process_one(
             return store.get_case(case_id)
         snapshot = fetch_snapshot(client, case["sha"], registration.source_prefix)
         validate_registration_source(client, registration, snapshot)
+        check_cancel()
         payload = case["payload"]
         if "repair_artifact" not in payload:
             store.update_case(case_id, owner, "baseline_running", {"source": {
@@ -105,11 +130,13 @@ def process_one(
             if result.outcome.value == "cleanup_failed":
                 store.finish(case_id, owner, "interrupted", {"message": "Cleanup failed; repository execution is quarantined."})
                 return store.get_case(case_id)
+            check_cancel()
             if result.baseline is not None:
                 store.set_health(registration.repository_id,
                                  checked_sha=snapshot.base_commit,
                                  outcome=result.baseline.outcome.value)
         repair = artifacts.get(payload["repair_artifact"])
+        check_cancel()
         if publisher.stale():
             return store.get_case(case_id)
         if repair["state"] != "repair_ready":
@@ -121,6 +148,11 @@ def process_one(
         else:
             publisher.publish(snapshot, repair, observe)
         return store.get_case(case_id)
+    except CancellationRequested:
+        # A running phase is bounded, and its existing worker owns cleanup. The
+        # HTTP process never gets daemon access and never kills unrelated work.
+        # Do not relabel unknown/failed cleanup as successful cancellation.
+        finish_cancel()
     except ReconciliationPending:
         store.finish(case_id, owner, "reconcile_pending", {
             "message": "A write may have completed. Retry the worker for read-only reconciliation."
@@ -130,7 +162,10 @@ def process_one(
         phase = "reconcile_pending" if store.get_case(case_id)["phase"] == "publishing" else "blocked"
         store.finish(case_id, owner, phase, {"message": str(exc)})
     except (PublicationBlocked, SourcePolicyError) as exc:
-        store.finish(case_id, owner, "blocked", {"message": str(exc)[:512]})
+        if store.get_case(case_id)["payload"].get("cancellation_requested"):
+            finish_cancel()
+        else:
+            store.finish(case_id, owner, "blocked", {"message": str(exc)[:512]})
     except Exception:
         # Unknown failures during execution must keep the repo quarantined, including
         # failures in the persistence observer. Never assume cleanup from an exception.
@@ -138,6 +173,21 @@ def process_one(
             "message": "Worker interrupted; inspect persisted phase/resources before recovery."
         })
     return store.get_case(case_id)
+
+
+def _completed_cleanup_succeeded(payload: dict[str, object]) -> bool:
+    cleanup = payload.get("cleanup")
+    for key in ("evidence", "attempt"):
+        evidence = payload.get(key)
+        if isinstance(evidence, dict) and isinstance(evidence.get("cleanup"), dict):
+            cleanup = evidence["cleanup"]
+            break
+    if not isinstance(cleanup, dict):
+        return False
+    try:
+        return CleanupEvidence.model_validate_json(json.dumps(cleanup)).succeeded
+    except ValueError:
+        return False
 
 
 def validate_registration_source(
@@ -268,6 +318,8 @@ class Publisher:
 
     def _write(self, key: str, method: str, path: str, body: dict[str, Any],
                discover: Callable[[], dict[str, Any] | None], *, content_addressed: bool = False) -> dict[str, Any]:
+        if self.case["payload"].get("cancellation_requested"):
+            raise CancellationRequested()
         if not self.registration.automatic_prs:
             raise PublicationBlocked("External writes are disabled")
         # Discover BEFORE intent creation distinguishes first dispatch from restart.
