@@ -1,29 +1,60 @@
-# Implementation status — update with observed evidence
+# Implementation status — observed evidence only
 
-**Last authored:** 2026-09-09. This pack is not an implemented application.
-**Current milestone:** M0 — environment and execution feasibility.
+**Last authored:** 2026-09-10.
+**Current milestone:** M0 — implementation present; live acceptance incomplete.
 **Target platform:** web app + GitHub App; local runner/CLI are engineering surfaces.
 
 | Capability | State | Evidence |
 |---|---|---|
-| v2 specification and controlled fixture | Authored; see validation report | `VALIDATION_REPORT.md` |
-| Docker daemon on user's machine | Unknown | Record `docker version` result |
-| AWS model invocation for this account | Unknown / previously blocked | Retest; do not assume |
-| Real Strands tool call | Not implemented | Requires configured provider |
-| Baseline isolated runner | Not implemented | M1 |
-| Isolated proof from clean state | Not implemented | M1 |
+| v2 specification and controlled fixture | Authored and pack-checked | `VALIDATION_REPORT.md`; `tools/check_pack.py` passed 24 handoff-only checks |
+| Python foundation and outcome contract | Implemented | Python 3.12.13; stable exits 0/10/11/12/13/14/15; commits `20b801b`, `4625f82` |
+| Read-only environment doctor | Implemented and unit-tested | `python -m firstrun doctor --json`; actual result below |
+| Backend dependency lock | Implemented | uv 0.12.9; Hatchling 1.32.0; Pydantic 2.13.5; Strands Agents 1.55.1; boto3/botocore 1.43.91 |
+| Docker client and selected context | Available | Docker client 29.7.2; context `desktop-linux`; local endpoint `npipe:////./pipe/dockerDesktopLinuxEngine` |
+| Docker server on this machine | Blocked | Server connection failed at 2026-09-10T12:41:42+05:30; engine type remains unknown |
+| Guarded Docker M0 preflight | Implemented and unit-tested; not live-run | Controller-owned digest-pinned containers, loopback-only verifier, hard limits, ownership-checked cleanup; 16 focused tests |
+| Guarded Strands/Bedrock M0 preflight | Implemented and unit-tested; provider/account unknown | Killable isolated child, exact dependency-origin checks, canonical endpoint reconciliation, test/live provenance, explicit spend and identity prerequisites |
+| Real Strands tool call | Not run | No named profile/region/model and no cost authorization were supplied; no provider call or credential read was made |
+| Baseline isolated runner and fresh proof | Not implemented | M1 has not started |
 | Agent-generated repair | Not implemented | M2 |
 | Real GitHub PR/check | Not implemented | M3 |
 | Web product | Not implemented | M4 |
 | Hosted AWS execution | Not implemented | M5 feasibility decision |
 
 ## Current blockers
-Record the exact error, timestamp, and reproduction command. Redact credentials.
-Do not use vague labels such as “AWS broken.”
+
+1. Docker Desktop's Linux daemon is unavailable. Reproduction:
+   `docker version --format "{{json .Server}}"` exits 1 with
+   `open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.`
+   No container was launched and no runtime image digest has been captured.
+2. Live provider proof requires a user-selected named AWS profile, exact region and
+   model ID, explicit cost acknowledgement, and confirmation that the current
+   identity was independently verified as temporary and non-root. These facts are
+   unknown; no AWS request has been made and no credential contents were accessed.
+
+M0 is not accepted until both live preflights produce recorded evidence or a
+specific external blocker is accepted. Unit doubles and the pack checker cannot
+satisfy those gates.
 
 ## Latest checkpoint
-- Commit:
+
+- Commit: `f6aae83` (`feat: add guarded M0 preflights`)
 - Commands and exit codes:
-- Accepted behavior:
-- Known limitations:
-- Next single task:
+  - `uv lock --check` — 0; 51 packages resolved.
+  - `uv run --frozen --extra provider --python 3.12.13 python -m unittest discover -s tests -v` — 0; 51 tests passed.
+  - `uv run --frozen --extra provider --python 3.12.13 python -m compileall -q backend tests` — 0.
+  - `uv run --frozen --extra provider --python 3.12.13 python tools/check_pack.py` — 0; 24 handoff-asset checks passed (not runtime proof).
+  - `uv run --frozen --extra provider --python 3.12.13 python -m firstrun doctor --json` — 12 (`infrastructure_error`); all required checks except Docker server/engine passed, Git tree was clean, provider remained deliberately unchecked.
+  - `docker context show` — 0; `desktop-linux`.
+  - `docker context inspect --format "{{json .Endpoints.docker.Host}}" desktop-linux` — 0; local named pipe above.
+  - `docker version --format "{{json .Server}}"` — 1; server unavailable.
+- Accepted behavior: permission gates stop Docker/provider side effects by default;
+  fake provider evidence is marked non-live and cannot be milestone-eligible;
+  ambiguous Docker creates are recovered by deterministic name and verified labels
+  before exact-ID cleanup; no non-loopback interface or route may satisfy egress proof.
+- Security review: no remaining P0/P1 findings in the implemented M0 boundaries.
+- Known limitations: no live Docker topology, cleanup, or image digest has been
+  observed; no AWS identity/model/usage has been observed; M1 is intentionally absent.
+- Next single task: start Docker Desktop, re-run the doctor, then—with explicit
+  container-change and image-pull approval—run the live Docker preflight and record
+  its resolved digest and cleanup evidence.
