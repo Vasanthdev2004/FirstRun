@@ -450,7 +450,11 @@ def is_safe_repair_baseline_failure(
         and observed.app_runtime.platform == target.runtime.platform
         and observed.app_runtime == observed.verifier_runtime
         and observed.app_container_id is not None
-        and observed.workspace_marker_digest is not None
+        and (
+            observed.fresh_state.workspace_marker_digest is not None
+            if isinstance(observed, RunEvidence)
+            else observed.workspace_marker_digest is not None
+        )
         and observed.cleanup.app_container_created
         and observed.cleanup.workspace_created
         and observed.cleanup.succeeded

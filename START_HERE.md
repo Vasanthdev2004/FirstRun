@@ -1,8 +1,9 @@
 # FirstRun v2 — start here
 
 **Artifact type:** implementation handoff + runnable controlled test fixture.
-**Not included:** the FirstRun application, Docker worker, Strands agent,
-GitHub integration, or deployed AWS environment. Their implementation is the task.
+**Original pack:** did not include the FirstRun application, worker, agent,
+GitHub integration, or deployed environment. For current implementation facts,
+read `STATUS.md`. M3 local integration setup is in `docs/GITHUB_SETUP.md`.
 
 ## Use this pack instead of v1
 If no implementation exists, extract this ZIP and put the contents of

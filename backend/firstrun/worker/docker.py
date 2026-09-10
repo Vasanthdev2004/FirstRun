@@ -509,8 +509,15 @@ def run_docker_phase(
     phase: Literal["baseline", "proof"],
     candidate: CandidatePatch | None = None,
     binding: ControllerBinding | None = None,
+    authorized_recipe: bool = False,
 ) -> DockerPhaseResult:
-    """Execute one independent phase and return controller-bound typed evidence."""
+    """Execute one independent phase and return controller-bound typed evidence.
+
+    ``authorized_recipe`` is a trusted-controller assertion used only when an
+    already-reviewed repaired recipe is committed at the prepared source revision.
+    It leaves the default M1/M2 baseline allowlist unchanged and still applies the
+    semantic proof-recipe policy before any repository container is created.
+    """
 
     authority = binding or ControllerBinding(
         run_id=uuid.uuid4(), attempt_id=uuid.uuid4(), workspace_id=uuid.uuid4()
@@ -536,6 +543,13 @@ def run_docker_phase(
             None,
             "baseline must use base bytes and proof must use an exact candidate",
         )
+    if type(authorized_recipe) is not bool or (authorized_recipe and phase != "baseline"):
+        return DockerPhaseResult(
+            Outcome.POLICY_BLOCKED,
+            authority,
+            None,
+            "authorized_recipe is valid only for a candidate-free baseline",
+        )
     try:
         if candidate is not None:
             _assert_candidate_authorized(snapshot, candidate, recipe)
@@ -547,7 +561,12 @@ def run_docker_phase(
             or runtime.image.architecture != expected_architecture
         ):
             raise SourcePolicyError("prepared runtime is not bound to the selected target")
-        _assert_recipe_authorized(recipe, phase=phase, source_files=snapshot.files)
+        recipe_policy_phase: Literal["baseline", "proof"] = (
+            "proof" if authorized_recipe else phase
+        )
+        _assert_recipe_authorized(
+            recipe, phase=recipe_policy_phase, source_files=snapshot.files
+        )
         _assert_preexecution_contracts(selected_files, recipe, target)
         runtime_evidence = _runtime_image_evidence(runtime, target)
     except (SourcePolicyError, ValueError, UnicodeError, json.JSONDecodeError) as exc:

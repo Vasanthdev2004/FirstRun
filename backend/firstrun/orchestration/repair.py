@@ -10,14 +10,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import sys
 import time
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Literal
 
 from firstrun.agent.capabilities import CapabilityRecord, RepairCapabilityBroker
@@ -25,7 +26,7 @@ from firstrun.agent.strands import (
     LiveRepairAgentObservation,
     run_live_repair_agent,
 )
-from firstrun.domain.contracts import Recipe
+from firstrun.domain.contracts import Recipe, Target
 from firstrun.domain.evidence import (
     AttemptEvidence,
     ContentDigest,
@@ -48,18 +49,27 @@ from firstrun.verification.local import (
     is_safe_repair_baseline_failure,
     prepare_local_case_inputs,
 )
-from firstrun.verification.policy import CONTROLLED_NODE_FIXTURE_POLICY
-from firstrun.verification.readme import replace_block_bytes
+from firstrun.verification.policy import (
+    CONTROLLED_NODE_FIXTURE_POLICY,
+    classify_target_tuple,
+)
+from firstrun.verification.readme import check_block_bytes, replace_block_bytes
 from firstrun.verification.source import (
+    MAX_FILE_BYTES,
+    MAX_SOURCE_BYTES,
+    MAX_SOURCE_FILES,
     CandidatePatch,
     SourcePolicyError,
     SourceSnapshot,
     build_candidate_patch,
+    content_tree_digest,
 )
 from firstrun.worker.docker import (
     DockerPhaseResult,
+    PreparedDockerRuntime,
     WorkerProblem,
     _DeadlineDockerCliRunner,
+    _assert_recipe_authorized,
     prepare_docker_runtime,
     run_docker_phase,
 )
@@ -72,6 +82,8 @@ from firstrun.worker.investigation import (
 NEEDS_INPUT_EXIT_CODE = 16
 _CLEANUP_GRACE_SECONDS = 30
 _SOURCE_TOOL_NAMES = frozenset({"read_source_file", "search_source"})
+_GIT_OBJECT_ID = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
+_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class RepairCaseState(StrEnum):
@@ -174,6 +186,7 @@ class RepairLocalResult:
 RepairAgentRunner = Callable[
     [RepairProviderConfig, RepairCapabilityBroker], LiveRepairAgentObservation
 ]
+RepairObserver = Callable[[str, dict[str, object]], None]
 
 
 def repair_local(
@@ -188,6 +201,128 @@ def repair_local(
         agent_runner=run_live_repair_agent,
         proposer_kind="live_strands",
     )
+
+
+def repair_snapshot(
+    snapshot: SourceSnapshot,
+    provider_config: RepairProviderConfig,
+    *,
+    observer: RepairObserver | None = None,
+    expected_runtime_digest: str | None = None,
+    expected_runtime_repository_digest: str | None = None,
+) -> RepairLocalResult:
+    """Repair one already-authorized, credential-free exact source snapshot.
+
+    The GitHub ingestion boundary owns installation/repository authorization and
+    construction of ``snapshot``.  This boundary independently revalidates its
+    byte identities and the registered target/recipe lane; it never consults the
+    local teaching fixture or a known repair oracle.
+    """
+
+    started_at = time.monotonic()
+    prerequisite = _repair_prerequisite_failure(
+        provider_config,
+        proposer_kind="live_strands",
+        started_at=started_at,
+        source_revision=_snapshot_revision(snapshot),
+    )
+    if prerequisite is not None:
+        return prerequisite
+    try:
+        snapshot, target, recipe = _prepare_snapshot_inputs(snapshot)
+    except (SourcePolicyError, ValueError, UnicodeError) as exc:
+        return RepairLocalResult(
+            state=RepairCaseState.BLOCKED,
+            outcome=Outcome.POLICY_BLOCKED,
+            source_revision=_snapshot_revision(snapshot),
+            message=_bounded_error(str(exc)),
+        )
+    return _run_prepared_repair(
+        snapshot,
+        target,
+        recipe,
+        provider_config,
+        agent_runner=run_live_repair_agent,
+        proposer_kind="live_strands",
+        started_at=started_at,
+        observer=observer,
+        authorized_baseline_recipe=True,
+        expected_runtime_digest=expected_runtime_digest,
+        expected_runtime_repository_digest=expected_runtime_repository_digest,
+    )
+
+
+def verify_snapshot(
+    snapshot: SourceSnapshot,
+    *,
+    observer: RepairObserver | None = None,
+    expected_runtime_digest: str | None = None,
+    expected_runtime_repository_digest: str | None = None,
+) -> DockerPhaseResult:
+    """Verify the reviewed recipe at one exact prepared revision without a model."""
+
+    binding = _new_binding()
+    try:
+        snapshot, target, recipe = _prepare_snapshot_inputs(snapshot)
+        runtime = prepare_docker_runtime(
+            target, controller_repository_root=snapshot.repository_root
+        )
+        _assert_expected_runtime(
+            runtime,
+            expected_runtime_digest,
+            expected_runtime_repository_digest,
+        )
+    except (SourcePolicyError, ValueError, UnicodeError) as exc:
+        return DockerPhaseResult(
+            Outcome.POLICY_BLOCKED, binding, None, _bounded_error(str(exc))
+        )
+    except WorkerProblem as exc:
+        return DockerPhaseResult(
+            exc.outcome, binding, None, _bounded_error(str(exc))
+        )
+
+    observer_error = _observe(
+        observer,
+        "verification_running",
+        _running_payload("verification", binding),
+    )
+    if observer_error is not None:
+        return DockerPhaseResult(
+            Outcome.INFRASTRUCTURE_ERROR, binding, None, observer_error
+        )
+    phase = run_docker_phase(
+        runtime,
+        snapshot,
+        target,
+        recipe,
+        phase="baseline",
+        binding=binding,
+        authorized_recipe=True,
+    )
+    observer_error = _observe(
+        observer,
+        "verification_completed",
+        _phase_payload("verification", phase),
+    )
+    if observer_error is not None:
+        return DockerPhaseResult(
+            Outcome.INFRASTRUCTURE_ERROR,
+            binding,
+            phase.evidence,
+            observer_error,
+            phase.attempt,
+        )
+    if phase.outcome is Outcome.PASSED and (
+        phase.evidence is None or not phase.evidence.verified
+    ):
+        return DockerPhaseResult(
+            Outcome.INFRASTRUCTURE_ERROR,
+            binding,
+            phase.evidence,
+            "worker reported pass without complete verified evidence",
+            phase.attempt,
+        )
+    return phase
 
 
 def _repair_local_with_test_agent(
@@ -216,34 +351,14 @@ def _run_repair_local(
     """Shared controller implementation with an explicitly derived proposer class."""
 
     started_at = time.monotonic()
-    if proposer_kind == "live_strands":
-        missing: list[str] = []
-        if not provider_config.provider_cost_acknowledged:
-            missing.append("--acknowledge-provider-cost")
-        if not provider_config.credential_identity_verified:
-            missing.append("--confirm-verified-temporary-non-root-credentials")
-        if not sys.flags.isolated:
-            missing.append("run the controller with python -I")
-        if missing:
-            message = "live repair prerequisites are missing: " + ", ".join(missing)
-            agent = _agent_evidence(
-                provider_config,
-                proposer_kind=proposer_kind,
-                observations=(),
-                records=(),
-                baseline_refs=(),
-                status="policy_blocked",
-                result=None,
-                error=message,
-                elapsed_ms=_elapsed_ms(started_at),
-            )
-            return RepairLocalResult(
-                state=RepairCaseState.BLOCKED,
-                outcome=Outcome.POLICY_BLOCKED,
-                source_revision=None,
-                agent=agent,
-                message=message,
-            )
+    prerequisite = _repair_prerequisite_failure(
+        provider_config,
+        proposer_kind=proposer_kind,
+        started_at=started_at,
+        source_revision=None,
+    )
+    if prerequisite is not None:
+        return prerequisite
 
     repo = Path(repo)
     target_path = repo / CONTROLLED_NODE_FIXTURE_POLICY.target_path
@@ -252,9 +367,52 @@ def _run_repair_local(
         return _from_input_failure(prepared)
     snapshot, target, baseline_recipe = prepared
 
+    return _run_prepared_repair(
+        snapshot,
+        target,
+        baseline_recipe,
+        provider_config,
+        agent_runner=agent_runner,
+        proposer_kind=proposer_kind,
+        started_at=started_at,
+        observer=None,
+        authorized_baseline_recipe=False,
+        expected_runtime_digest=None,
+        expected_runtime_repository_digest=None,
+    )
+
+
+def _run_prepared_repair(
+    snapshot: SourceSnapshot,
+    target: Target,
+    baseline_recipe: Recipe,
+    provider_config: RepairProviderConfig,
+    *,
+    agent_runner: RepairAgentRunner,
+    proposer_kind: Literal["live_strands", "fake_test"],
+    started_at: float,
+    observer: RepairObserver | None,
+    authorized_baseline_recipe: bool,
+    expected_runtime_digest: str | None,
+    expected_runtime_repository_digest: str | None,
+) -> RepairLocalResult:
+    """Execute the M2 loop against validated, credential-free source bytes."""
+
     try:
         runtime = prepare_docker_runtime(
             target, controller_repository_root=snapshot.repository_root
+        )
+        _assert_expected_runtime(
+            runtime,
+            expected_runtime_digest,
+            expected_runtime_repository_digest,
+        )
+    except SourcePolicyError as exc:
+        return RepairLocalResult(
+            state=RepairCaseState.BLOCKED,
+            outcome=Outcome.POLICY_BLOCKED,
+            source_revision=snapshot.base_commit,
+            message=_bounded_error(str(exc)),
         )
     except WorkerProblem as exc:
         return RepairLocalResult(
@@ -275,13 +433,42 @@ def _run_repair_local(
             budget_name="phase",
         ),
     )
+    baseline_binding = _new_binding()
+    observer_error = _observe(
+        observer,
+        "baseline_running",
+        _running_payload("baseline", baseline_binding),
+    )
+    if observer_error is not None:
+        return RepairLocalResult(
+            state=RepairCaseState.BLOCKED,
+            outcome=Outcome.INFRASTRUCTURE_ERROR,
+            source_revision=snapshot.base_commit,
+            message=observer_error,
+        )
     baseline_phase = run_docker_phase(
         runtime,
         snapshot,
         target,
         baseline_recipe,
         phase="baseline",
+        binding=baseline_binding,
+        authorized_recipe=authorized_baseline_recipe,
     )
+    observer_error = _observe(
+        observer,
+        "baseline_completed",
+        _phase_payload("baseline", baseline_phase),
+    )
+    if observer_error is not None:
+        return RepairLocalResult(
+            state=RepairCaseState.BLOCKED,
+            outcome=Outcome.INFRASTRUCTURE_ERROR,
+            source_revision=snapshot.base_commit,
+            baseline=baseline_phase.evidence,
+            baseline_attempt=baseline_phase.attempt,
+            message=observer_error,
+        )
     if baseline_phase.outcome is Outcome.PASSED:
         if baseline_phase.evidence is None or not baseline_phase.evidence.verified:
             return RepairLocalResult(
@@ -362,6 +549,7 @@ def _run_repair_local(
 
         attempt_config = _attempt_config(provider_config, remaining)
         try:
+            investigation_binding = _new_binding()
             session = DockerInvestigationSession(
                 runtime,
                 snapshot,
@@ -369,6 +557,7 @@ def _run_repair_local(
                 baseline_recipe,
                 max_diagnostics=provider_config.max_diagnostic_commands_per_attempt,
                 wall_time_seconds=max(1, min(120, int(remaining))),
+                binding=investigation_binding,
             )
             broker = RepairCapabilityBroker(
                 case_token=secrets.token_hex(16),
@@ -405,6 +594,37 @@ def _run_repair_local(
                 message=message,
             )
 
+        observer_error = _observe(
+            observer,
+            "investigation_running",
+            _running_payload(
+                "investigation", investigation_binding, attempt_number=attempt_number
+            ),
+        )
+        if observer_error is not None:
+            agent = _agent_evidence(
+                provider_config,
+                proposer_kind=proposer_kind,
+                observations=tuple(observations),
+                records=tuple(records),
+                baseline_refs=(baseline_ref,),
+                status="infrastructure_error",
+                result=None,
+                error=observer_error,
+                elapsed_ms=_elapsed_ms(started_at),
+            )
+            return _result(
+                state=RepairCaseState.BLOCKED,
+                outcome=Outcome.INFRASTRUCTURE_ERROR,
+                snapshot_revision=snapshot.base_commit,
+                baseline_phase=baseline_phase,
+                agent=agent,
+                investigations=investigations,
+                proofs=proofs,
+                candidate=final_candidate,
+                message=observer_error,
+            )
+
         try:
             session.open()
             observation = agent_runner(attempt_config, broker)
@@ -430,6 +650,38 @@ def _run_repair_local(
         observations.append(observation)
         records.extend(broker.records)
         investigations.append(investigation)
+        observer_error = _observe(
+            observer,
+            "investigation_completed",
+            {
+                "phase": "investigation",
+                "attempt_number": attempt_number,
+                **_investigation_to_dict(investigation),
+            },
+        )
+        if observer_error is not None:
+            agent = _agent_evidence(
+                provider_config,
+                proposer_kind=proposer_kind,
+                observations=tuple(observations),
+                records=tuple(records),
+                baseline_refs=(baseline_ref,),
+                status="infrastructure_error",
+                result=None,
+                error=observer_error,
+                elapsed_ms=_elapsed_ms(started_at),
+            )
+            return _result(
+                state=RepairCaseState.BLOCKED,
+                outcome=Outcome.INFRASTRUCTURE_ERROR,
+                snapshot_revision=snapshot.base_commit,
+                baseline_phase=baseline_phase,
+                agent=agent,
+                investigations=investigations,
+                proofs=proofs,
+                candidate=final_candidate,
+                message=observer_error,
+            )
         if not investigation.proof_may_start:
             outcome = investigation.outcome
             if outcome is Outcome.PASSED:
@@ -686,6 +938,41 @@ def _run_repair_local(
                 message=message,
             )
 
+        proof_binding = _new_binding()
+        observer_error = _observe(
+            observer,
+            "proof_running",
+            {
+                **_running_payload(
+                    "proof", proof_binding, attempt_number=attempt_number
+                ),
+                "candidate_digest": candidate.patch_digest,
+                "candidate_tree_digest": candidate.candidate_tree_digest,
+            },
+        )
+        if observer_error is not None:
+            agent = _agent_evidence(
+                provider_config,
+                proposer_kind=proposer_kind,
+                observations=tuple(observations),
+                records=tuple(records),
+                baseline_refs=(baseline_ref,),
+                status="completed",
+                result=decision,
+                error=None,
+                elapsed_ms=_elapsed_ms(started_at),
+            )
+            return _result(
+                state=RepairCaseState.BLOCKED,
+                outcome=Outcome.INFRASTRUCTURE_ERROR,
+                snapshot_revision=snapshot.base_commit,
+                baseline_phase=baseline_phase,
+                agent=agent,
+                investigations=investigations,
+                proofs=proofs,
+                candidate=candidate,
+                message=observer_error,
+            )
         proof_phase = run_docker_phase(
             runtime,
             snapshot,
@@ -693,8 +980,38 @@ def _run_repair_local(
             decision.proposed_recipe,
             phase="proof",
             candidate=candidate,
+            binding=proof_binding,
         )
-        proofs.append(_proof_record(attempt_number, candidate, proof_phase))
+        proof_record = _proof_record(attempt_number, candidate, proof_phase)
+        proofs.append(proof_record)
+        observer_error = _observe(
+            observer,
+            "proof_completed",
+            {"phase": "proof", **proof_record.to_dict()},
+        )
+        if observer_error is not None:
+            agent = _agent_evidence(
+                provider_config,
+                proposer_kind=proposer_kind,
+                observations=tuple(observations),
+                records=tuple(records),
+                baseline_refs=(baseline_ref,),
+                status="completed",
+                result=decision,
+                error=None,
+                elapsed_ms=_elapsed_ms(started_at),
+            )
+            return _result(
+                state=RepairCaseState.BLOCKED,
+                outcome=Outcome.INFRASTRUCTURE_ERROR,
+                snapshot_revision=snapshot.base_commit,
+                baseline_phase=baseline_phase,
+                agent=agent,
+                investigations=investigations,
+                proofs=proofs,
+                candidate=candidate,
+                message=observer_error,
+            )
         proof = proof_phase.evidence
         if (
             proof_phase.outcome is Outcome.PASSED
@@ -806,6 +1123,250 @@ def _run_repair_local(
         proofs=proofs,
         candidate=final_candidate,
         message=message,
+    )
+
+
+def _repair_prerequisite_failure(
+    provider_config: RepairProviderConfig,
+    *,
+    proposer_kind: Literal["live_strands", "fake_test"],
+    started_at: float,
+    source_revision: str | None,
+) -> RepairLocalResult | None:
+    if proposer_kind != "live_strands":
+        return None
+    missing: list[str] = []
+    if not provider_config.provider_cost_acknowledged:
+        missing.append("--acknowledge-provider-cost")
+    if not provider_config.credential_identity_verified:
+        missing.append("--confirm-verified-temporary-non-root-credentials")
+    if not sys.flags.isolated:
+        missing.append("run the controller with python -I")
+    if not missing:
+        return None
+    message = "live repair prerequisites are missing: " + ", ".join(missing)
+    agent = _agent_evidence(
+        provider_config,
+        proposer_kind=proposer_kind,
+        observations=(),
+        records=(),
+        baseline_refs=(),
+        status="policy_blocked",
+        result=None,
+        error=message,
+        elapsed_ms=_elapsed_ms(started_at),
+    )
+    return RepairLocalResult(
+        state=RepairCaseState.BLOCKED,
+        outcome=Outcome.POLICY_BLOCKED,
+        source_revision=source_revision,
+        agent=agent,
+        message=message,
+    )
+
+
+def _prepare_snapshot_inputs(
+    snapshot: SourceSnapshot,
+) -> tuple[SourceSnapshot, Target, Recipe]:
+    """Seal and validate prepared source without consulting a local checkout."""
+
+    if type(snapshot) is not SourceSnapshot:
+        raise SourcePolicyError("prepared source must be a SourceSnapshot")
+    for name, value in (
+        ("base commit", snapshot.base_commit),
+        ("base tree", snapshot.base_tree),
+        ("source tree", snapshot.source_tree),
+    ):
+        if not isinstance(value, str) or _GIT_OBJECT_ID.fullmatch(value) is None:
+            raise SourcePolicyError(f"prepared source has an invalid {name}")
+    if not isinstance(snapshot.archive_digest, str) or _SHA256.fullmatch(
+        snapshot.archive_digest
+    ) is None:
+        raise SourcePolicyError("prepared source has an invalid archive digest")
+    if not isinstance(snapshot.content_tree_digest, str) or _SHA256.fullmatch(
+        snapshot.content_tree_digest
+    ) is None:
+        raise SourcePolicyError("prepared source has an invalid content-tree digest")
+    if not isinstance(snapshot.files, Mapping):
+        raise SourcePolicyError("prepared source files must be a mapping")
+    if not 1 <= len(snapshot.files) <= MAX_SOURCE_FILES:
+        raise SourcePolicyError("prepared source file count is outside policy")
+
+    sealed_files: dict[str, bytes] = {}
+    total_bytes = 0
+    for path, content in snapshot.files.items():
+        if not isinstance(path, str) or not path or len(path) > 256:
+            raise SourcePolicyError("prepared source contains an invalid path")
+        parsed = PurePosixPath(path)
+        if (
+            "\\" in path
+            or ":" in path
+            or any(character in path for character in "\x00\r\n")
+            or parsed.is_absolute()
+            or ".." in parsed.parts
+            or str(parsed) != path
+        ):
+            raise SourcePolicyError("prepared source path is not normalized")
+        if type(content) is not bytes or len(content) > MAX_FILE_BYTES:
+            raise SourcePolicyError(f"prepared source file is invalid or oversized: {path}")
+        sealed_files[path] = content
+        total_bytes += len(content)
+    if total_bytes > MAX_SOURCE_BYTES:
+        raise SourcePolicyError("prepared source exceeds its byte limit")
+    required = {
+        CONTROLLED_NODE_FIXTURE_POLICY.target_path,
+        CONTROLLED_NODE_FIXTURE_POLICY.recipe_path,
+        CONTROLLED_NODE_FIXTURE_POLICY.readme_path,
+        "package.json",
+    }
+    missing = sorted(required.difference(sealed_files))
+    if missing:
+        raise SourcePolicyError(
+            "prepared source is missing required controlled files: " + ", ".join(missing)
+        )
+    observed_tree_digest = content_tree_digest(sealed_files)
+    if observed_tree_digest != snapshot.content_tree_digest:
+        raise SourcePolicyError("prepared source bytes do not match its content-tree digest")
+
+    # A private byte copy closes mutation races between remote ingestion, the model
+    # tools, candidate construction, and proof. SourceSnapshot remains credential-free.
+    from types import MappingProxyType
+
+    sealed = replace(snapshot, files=MappingProxyType(sealed_files))
+    target = Target.model_validate(
+        _load_unique_json(sealed.content(CONTROLLED_NODE_FIXTURE_POLICY.target_path))
+    )
+    recipe = Recipe.model_validate(
+        _load_unique_json(sealed.content(CONTROLLED_NODE_FIXTURE_POLICY.recipe_path))
+    )
+    if (
+        classify_target_tuple(
+            image_reference=target.runtime.image_ref,
+            platform=target.runtime.platform,
+            verifier_id=target.acceptance.verifier_id,
+        )
+        is not Outcome.PASSED
+    ):
+        raise SourcePolicyError("prepared target is outside the registered fixture lane")
+    if not check_block_bytes(
+        sealed.content(CONTROLLED_NODE_FIXTURE_POLICY.readme_path), recipe
+    ):
+        raise SourcePolicyError("README managed block differs from the prepared recipe")
+    # Prepared remote revisions may contain a previously reviewed repair. They do
+    # not inherit the teaching fixture's deliberately broken baseline allowlist.
+    _assert_recipe_authorized(recipe, phase="proof", source_files=sealed.files)
+    return sealed, target, recipe
+
+
+def _assert_expected_runtime(
+    runtime: PreparedDockerRuntime,
+    expected_image_id: str | None,
+    expected_repository_digest: str | None,
+) -> None:
+    if expected_image_id is not None:
+        if not isinstance(expected_image_id, str) or _SHA256.fullmatch(
+            expected_image_id
+        ) is None:
+            raise SourcePolicyError("expected runtime image ID is invalid")
+        if runtime.image.image_id != expected_image_id:
+            raise SourcePolicyError("prepared runtime image ID differs from registration")
+    if expected_repository_digest is None:
+        return
+    if not isinstance(expected_repository_digest, str):
+        raise SourcePolicyError("expected runtime repository digest is invalid")
+    actual_reference = runtime.image.repository_digest
+    actual_digest = actual_reference.rsplit("@", 1)[-1]
+    if _SHA256.fullmatch(expected_repository_digest) is not None:
+        matches = actual_digest == expected_repository_digest
+    else:
+        matches = bool(
+            "@" in expected_repository_digest
+            and _SHA256.fullmatch(expected_repository_digest.rsplit("@", 1)[-1])
+            and actual_reference == expected_repository_digest
+        )
+    if not matches:
+        raise SourcePolicyError(
+            "prepared runtime repository digest differs from registration"
+        )
+
+
+def _new_binding() -> ControllerBinding:
+    import uuid
+
+    return ControllerBinding(
+        run_id=uuid.uuid4(), attempt_id=uuid.uuid4(), workspace_id=uuid.uuid4()
+    )
+
+
+def _observe(
+    observer: RepairObserver | None,
+    event: str,
+    payload: dict[str, object],
+) -> str | None:
+    if observer is None:
+        return None
+    try:
+        observer(event, payload)
+    except Exception:
+        return f"trusted persistence observer failed during {event}"
+    return None
+
+
+def _running_payload(
+    phase: str,
+    binding: ControllerBinding,
+    *,
+    attempt_number: int | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "phase": phase,
+        "binding": binding.model_dump(mode="json"),
+    }
+    if attempt_number is not None:
+        payload["attempt_number"] = attempt_number
+    return payload
+
+
+def _phase_payload(phase: str, result: DockerPhaseResult) -> dict[str, object]:
+    return {
+        "phase": phase,
+        "outcome": result.outcome.value,
+        "binding": result.binding.model_dump(mode="json"),
+        "evidence": (
+            result.evidence.model_dump(mode="json")
+            if result.evidence is not None
+            else None
+        ),
+        "attempt": (
+            result.attempt.model_dump(mode="json")
+            if result.attempt is not None
+            else None
+        ),
+        "error": _bounded_error(result.error) if result.error else None,
+    }
+
+
+def _snapshot_revision(value: object) -> str | None:
+    if isinstance(value, SourceSnapshot) and isinstance(value.base_commit, str):
+        return value.base_commit
+    return None
+
+
+def _load_unique_json(content: bytes) -> Any:
+    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise SourcePolicyError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
+    return json.loads(
+        content.decode("utf-8"),
+        object_pairs_hook=unique,
+        parse_constant=lambda value: (_ for _ in ()).throw(
+            SourcePolicyError(f"unsupported JSON constant: {value}")
+        ),
     )
 
 
@@ -1344,5 +1905,8 @@ __all__ = [
     "ProofAttemptRecord",
     "RepairCaseState",
     "RepairLocalResult",
+    "RepairObserver",
     "repair_local",
+    "repair_snapshot",
+    "verify_snapshot",
 ]

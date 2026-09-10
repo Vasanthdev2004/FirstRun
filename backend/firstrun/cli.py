@@ -25,6 +25,8 @@ M0_RUNTIME_IMAGE = "node:22-bookworm-slim"
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="firstrun")
     subcommands = parser.add_subparsers(dest="command", required=True)
+    from firstrun.github_cli import add_commands
+    add_commands(subcommands)
 
     doctor = subcommands.add_parser(
         "doctor", help="inspect M0 prerequisites without changing system state"
@@ -148,6 +150,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if getattr(args, "github_command", False):
+        from firstrun.github_cli import run_command
+        return run_command(args)
     if args.command == "doctor":
         result = run_doctor(args.repo)
         if args.json:
