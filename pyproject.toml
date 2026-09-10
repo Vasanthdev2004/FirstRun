@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "firstrun"
+version = "0.1.0"
+description = "Trustworthy local setup verification engine for FirstRun"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[project.scripts]
+firstrun = "firstrun.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend/firstrun"]
+
+[tool.uv]
+default-groups = []
