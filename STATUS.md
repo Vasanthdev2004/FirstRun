@@ -1,76 +1,73 @@
 # Implementation status — observed evidence only
 
-**Last authored:** 2026-09-10.
-**Current milestone:** M0 — implementation present; live acceptance incomplete.
-**Target platform:** web app + GitHub App; local runner/CLI are engineering surfaces.
+**Last authored:** 2026-09-10.  
+**Current checkpoint:** M1 implementation complete; exact-revision live acceptance is
+the release gate for this checkpoint.  
+**Product target:** web app + GitHub App; the current local CLI/worker is the trusted
+engine slice, not the end-user product.
 
 | Capability | State | Evidence |
 |---|---|---|
-| v2 specification and controlled fixture | Authored and pack-checked | `VALIDATION_REPORT.md`; `tools/check_pack.py` passed 24 handoff-only checks |
-| Python foundation and outcome contract | Implemented | Python 3.12.13; stable exits 0/10/11/12/13/14/15; commits `bddc022`, `6fbea08` |
-| Read-only environment doctor | Implemented and unit-tested | `python -m firstrun doctor --json`; actual result below |
-| Backend dependency lock | Implemented | uv 0.12.9; Hatchling 1.32.0; Pydantic 2.13.5; Strands Agents 1.55.1; boto3/botocore 1.43.91 |
-| Docker client and selected context | Available | Docker client 29.7.2; context `desktop-linux`; local endpoint `npipe:////./pipe/dockerDesktopLinuxEngine` |
-| Docker server on this machine | Passed | At 2026-09-10T13:23:00+05:30: Docker Desktop 4.88.1, Engine 29.7.2/API 1.55, Linux/amd64 |
-| Guarded Docker M0 preflight | Live passed | Run `5d97eab095824899a89865f57637d559`; digest-pinned runtime, isolated verifier, and independently reconciled cleanup |
-| Guarded Strands/Bedrock M0 preflight | Implemented and unit-tested; provider/account unknown | Killable isolated child, exact dependency-origin checks, canonical endpoint reconciliation, test/live provenance, explicit spend and identity prerequisites |
-| Real Strands tool call | Not run | No named profile/region/model and no cost authorization were supplied; no provider call or credential read was made |
-| Baseline isolated runner and fresh proof | Not implemented | M1 has not started |
-| Agent-generated repair | Not implemented | M2 |
-| Real GitHub PR/check | Not implemented | M3 |
-| Web product | Not implemented | M4 |
-| Hosted AWS execution | Not implemented | M5 feasibility decision |
+| v2 specification and controlled fixture | Present and pack-checked | `uv run --frozen python tools/check_pack.py` — exit 0; 24 handoff-asset checks |
+| M0 Python/outcome foundation | Implemented | Python 3.12; stable exits 0/10/11/12/13/14/15; locked dependencies |
+| M0 Docker preflight | Live passed on this machine | Docker Desktop Linux engine, local named pipe, digest-pinned Node image, isolated verifier, exact-ID cleanup |
+| M0 Strands/Bedrock preflight | Implemented and unit-tested; live provider check deferred | No profile, region, model, spend authorization, or independently verified temporary non-root identity was supplied; no AWS request or credential-content access occurred |
+| M1 target and recipe contracts | Implemented | Strict Pydantic models reject extra fields, ambiguous paths, shell text, invalid steps, and verifier-in-recipe input |
+| M1 README/recipe contract | Implemented | Recipe is executable source; managed README bytes are deterministically rendered and divergence is policy-blocked |
+| M1 committed-source capture | Implemented | Exact `HEAD^{commit}` and Git trees; regular 0644 blobs only; bounded canonical archive; no working-tree bytes, filters, links, executable entries, or repo-local Git/Docker binaries |
+| M1 baseline and proof worker | Implemented | Independent non-root, read-only, capability-dropped, seccomp-confined, no-egress Docker containers with tmpfs state and controller deadlines |
+| M1 acceptance | Implemented | Controller-owned external create/read nonce probe; health alone cannot pass; model/client payloads cannot certify success |
+| M1 evidence and cleanup | Implemented | Typed evidence binds commit/tree, source archive, candidate patch/tree, target, recipe, README, verifier, policy, runtime digests, commands, observations, identities, and cleanup; leaked owned resources quarantine the endpoint |
+| M2 Strands repair loop | Not implemented | Next milestone; the known M1 oracle is test-only and not an agent repair command |
+| M3 GitHub workflow | Not implemented | No App/webhook/PR/check writes; never auto-merge |
+| M4 web product | Not implemented | No UI/backend product workflow yet |
+| M5 hosted execution | Not implemented | No cloud resources provisioned |
 
-## Current blockers
+## M1 acceptance coverage
 
-1. Live provider proof requires a user-selected named AWS profile, exact region and
-   model ID, explicit cost acknowledgement, and confirmation that the current
-   identity was independently verified as temporary and non-root. These facts are
-   unknown; no AWS request has been made and no credential contents were accessed.
+- A01 and A09: the committed fixture becomes healthy but its functional create/read
+  probe fails.
+- A02 and A06: the allowlisted known recipe repair passes only in a separately
+  created workspace with a distinct run, attempt, workspace, app, and verifier;
+  seeded hidden-state markers must be absent.
+- A07, A08, A13, and A14: protected-target edits, README divergence, untrusted proof
+  claims, arbitrary repositories, traversal, links, and host executable shadowing are
+  rejected.
+- A15: successful candidate proof does not alter the committed broken baseline.
+- A17: incomplete cleanup yields `cleanup_failed`, bounded evidence, and a persistent
+  process-level Docker-endpoint quarantine.
 
-M0 is not accepted until the remaining live Strands preflight produces recorded
-evidence or the repository owner accepts the specific provider blocker above. Unit
-doubles and the pack checker cannot satisfy that gate.
+The final checkpoint command is:
 
-## Superseded host observation
+`$env:FIRSTRUN_RUN_LIVE_M1='1'; uv run --frozen python -m unittest discover -s tests -p 'test_*.py' -v`
 
-At 2026-09-10T13:03:10+05:30 an earlier Docker Desktop start crashed on a stale
-runtime socket, and a direct `docker-desktop` WSL start reported a read-only fallback
-mount. FirstRun performed no VHD repair, reset, or data-disk mutation. By 13:23 the
-Linux engine was reachable and the live preflight passed, so the earlier condition
-is not current; its external resolution remains unknown.
+It must pass all 125 unit tests and 6 live Docker integration tests with no skips on
+the exact clean revision reported in the handoff. A skipped live test is not a pass.
 
-## Latest checkpoint
+## Checkpoint commits
 
-- Implementation commit: `4c56690` (`feat: add guarded M0 preflights`)
-- Commands and exit codes:
-  - `uv lock --check` — 0; 51 packages resolved.
-  - `uv run --frozen --extra provider --python 3.12.13 python -m unittest discover -s tests -v` — 0; 51 tests passed.
-  - `uv run --frozen --extra provider --python 3.12.13 python -m compileall -q backend tests` — 0.
-  - `uv run --frozen --extra provider --python 3.12.13 python tools/check_pack.py` — 0; 24 handoff-asset checks passed (not runtime proof).
-  - `uv run --frozen --extra provider --python 3.12.13 python -m firstrun doctor --json` — 0; all required environment checks passed, Git tree was clean, provider remained deliberately unchecked.
-  - `docker context show` — 0; `desktop-linux`.
-  - `docker context inspect --format "{{json .Endpoints.docker.Host}}" desktop-linux` — 0; local named pipe above.
-  - `docker version --format "{{json .Server}}"` — 0; Docker Desktop 4.88.1,
-    Engine 29.7.2/API 1.55, Linux/amd64.
-  - `uv run --frozen --extra provider --python 3.12.13 python -m firstrun preflight-docker --acknowledge-container-changes --allow-pull --json` — 0 at source revision
-    `b52f368`; run `5d97eab095824899a89865f57637d559`, endpoint
-    `npipe:////./pipe/dockerDesktopLinuxEngine`, image ID and repository digest
-    `sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5`,
-    app program `sha256:8a9849af7047ab3fe00e9438d0f90c8f35142048c5cd2fe201c5e2caf2af1843`,
-    verifier program `sha256:fc86cc408d76465561eb80a7ed7aa4f2b558b0c86e0e41ef6b202fbd937f9a75`.
-  - Verifier output — health true, only loopback interfaces, no non-loopback
-    routes, and egress blocked; all 13 declared checks passed.
-  - Independent cleanup reconciliation — the run-label query returned no IDs;
-    both reported container IDs returned `No such container`; exact image inspect
-    confirmed the recorded digest and Linux/amd64 platform.
-- Accepted behavior: permission gates stop Docker/provider side effects by default;
-  fake provider evidence is marked non-live and cannot be milestone-eligible;
-  ambiguous Docker creates are recovered by deterministic name and verified labels
-  before exact-ID cleanup; no non-loopback interface or route may satisfy egress proof.
-- Security review: no remaining P0/P1 findings in the implemented M0 boundaries.
-- Known limitations: the pinned Node runtime image remains in Docker's local image
-  cache; no AWS identity/model/usage has been observed; M1 is intentionally absent.
-- Next single task: either provide the approved AWS profile, exact region and model
-  ID plus the two required acknowledgements for a live Strands call, or explicitly
-  accept the named provider blocker for M0.
+- `115f825` — strict M1 contracts and evidence foundation.
+- `5b9f83f` — isolated local baseline/known-oracle verification.
+- `f759d95` — source, host-execution, output-bound, provenance, cleanup, and
+  acceptance hardening.
+
+## Known limitations and blockers
+
+1. Live Strands/Bedrock validation remains unknown and requires the owner-selected
+   profile, exact region/model, explicit cost acknowledgement, and confirmation of
+   independently verified temporary non-root credentials. This is an M0 provider
+   blocker deferred while the owner requested the local project engine first.
+2. M1 intentionally supports only the controller-owned `fixtures/notes-app` lane and
+   a controller-owned known repair oracle. It does not accept arbitrary repositories.
+3. M1 source materialization uses a single bounded Docker CLI argument. The current
+   committed fixture is safely below Windows' argument limit; widening the source
+   policy requires a trusted chunked/streaming transport first.
+4. Cleanup is bounded per Docker operation but does not yet have one aggregate
+   cleanup deadline. Any cleanup error quarantines the endpoint; aggregate deadline
+   hardening remains required before widening beyond the controlled local lane.
+
+## Next single task
+
+After the exact-revision M1 gate passes, begin M2 only: integrate the narrow Strands
+repair loop without exposing the known oracle, GitHub writes, UI, or later-milestone
+scaffolding.
