@@ -10,10 +10,11 @@ from typing import Any
 from pydantic import ValidationError
 
 from firstrun.domain.contracts import Recipe, Target
-from firstrun.domain.evidence import AttemptEvidence, RunEvidence
+from firstrun.domain.evidence import AttemptEvidence, ContentDigest, RunEvidence
 from firstrun.domain.outcomes import Outcome
 from firstrun.verification.policy import (
     CONTROLLED_NODE_FIXTURE_POLICY,
+    CONTROLLED_NODE_FIXTURE_POLICY_DIGEST,
     classify_target_tuple,
 )
 from firstrun.verification.readme import check_block_bytes, replace_block_bytes
@@ -391,4 +392,95 @@ def _load_unique_json(content: bytes) -> Any:
     )
 
 
-__all__ = ["LocalVerificationResult", "verify_known_oracle", "verify_local"]
+def prepare_local_case_inputs(
+    repo: Path, target_path: Path
+) -> tuple[SourceSnapshot, Target, Recipe] | LocalVerificationResult:
+    """Expose the M1 input gate for the trusted M2 controller."""
+
+    return _prepare_inputs(repo, target_path)
+
+
+def is_complete_functional_baseline_failure(phase: DockerPhaseResult) -> bool:
+    """Return whether a failed baseline is complete enough for investigation."""
+
+    return _is_expected_known_broken_baseline(phase)
+
+
+def is_safe_repair_baseline_failure(
+    phase: DockerPhaseResult,
+    snapshot: SourceSnapshot,
+    target: Target,
+    recipe: Recipe,
+) -> bool:
+    """Accept only controller-bound repository failures as M2 evidence.
+
+    Unlike the M1 known-oracle predicate, this also permits an intact partial
+    attempt when a recipe command or managed start fails before the verifier can
+    run. Infrastructure, timeout, policy, and cleanup failures remain terminal.
+    """
+
+    observed = phase.evidence or phase.attempt
+    if phase.outcome is not Outcome.FAILED or observed is None:
+        return False
+    policy = CONTROLLED_NODE_FIXTURE_POLICY
+    common = bool(
+        observed.phase == "baseline"
+        and observed.outcome is Outcome.FAILED
+        and not observed.sanitized_errors
+        and observed.candidate_digest is None
+        and observed.candidate_tree_digest is None
+        and observed.base_commit == snapshot.base_commit
+        and observed.base_git_tree == snapshot.base_tree
+        and observed.source_git_tree == snapshot.source_tree
+        and observed.base_tree_digest == ContentDigest(snapshot.content_tree_digest)
+        and observed.base_archive_digest == ContentDigest(snapshot.archive_digest)
+        and observed.target_reference == policy.target_path
+        and observed.target_digest
+        == ContentDigest.from_bytes(snapshot.content(policy.target_path))
+        and observed.recipe_reference == policy.recipe_path
+        and observed.recipe_digest
+        == ContentDigest.from_bytes(snapshot.content(policy.recipe_path))
+        and observed.readme_reference == policy.readme_path
+        and observed.readme_digest
+        == ContentDigest.from_bytes(snapshot.content(policy.readme_path))
+        and observed.verifier_id == target.acceptance.verifier_id
+        and observed.policy_revision == policy.revision
+        and observed.policy_digest == CONTROLLED_NODE_FIXTURE_POLICY_DIGEST
+        and observed.app_runtime.requested_reference == target.runtime.image_ref
+        and observed.app_runtime.platform == target.runtime.platform
+        and observed.app_runtime == observed.verifier_runtime
+        and observed.app_container_id is not None
+        and observed.workspace_marker_digest is not None
+        and observed.cleanup.app_container_created
+        and observed.cleanup.workspace_created
+        and observed.cleanup.succeeded
+        and bool(observed.commands)
+    )
+    if not common:
+        return False
+    if isinstance(observed, RunEvidence):
+        return bool(
+            observed.policy_authorized
+            and observed.fresh_state.satisfied
+            and observed.target_digest == observed.observed_target_digest
+            and observed.recipe_digest == observed.executed_recipe_digest
+            and observed.readme_digest == observed.rendered_readme_digest
+            and observed.verifier_digest == observed.observed_verifier_digest
+            and observed.policy_digest == observed.observed_policy_digest
+            and (
+                any(not command.succeeded for command in observed.commands)
+                or not observed.readiness.succeeded
+                or not observed.acceptance_probe.succeeded
+            )
+        )
+    return any(not command.succeeded for command in observed.commands)
+
+
+__all__ = [
+    "LocalVerificationResult",
+    "is_complete_functional_baseline_failure",
+    "is_safe_repair_baseline_failure",
+    "prepare_local_case_inputs",
+    "verify_known_oracle",
+    "verify_local",
+]

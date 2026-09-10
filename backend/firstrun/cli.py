@@ -8,8 +8,12 @@ from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from firstrun.doctor import run_doctor
 from firstrun.domain import Outcome, exit_code_for
+from firstrun.domain.repair import RepairProviderConfig
+from firstrun.orchestration.repair import repair_local
 from firstrun.preflight.docker import DockerPreflightConfig, run_docker_preflight
 from firstrun.preflight.strands import StrandsPreflightConfig, run_strands_preflight
 from firstrun.verification.local import verify_local
@@ -106,6 +110,38 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit complete typed run evidence",
+    )
+
+    repair = subcommands.add_parser(
+        "repair-local",
+        help="investigate and prove an authorized recipe repair with Strands",
+    )
+    repair.add_argument(
+        "--repo",
+        type=Path,
+        required=True,
+        help="exact path of the controller-approved fixture repository",
+    )
+    repair.add_argument("--aws-profile", required=True)
+    repair.add_argument("--region", required=True)
+    repair.add_argument("--model-id", required=True)
+    repair.add_argument(
+        "--acknowledge-provider-cost",
+        action="store_true",
+        help="allow bounded Strands requests that may incur AWS charges",
+    )
+    repair.add_argument(
+        "--confirm-verified-temporary-non-root-credentials",
+        action="store_true",
+        help=(
+            "confirm the named profile's current AWS identity was independently "
+            "verified as temporary and non-root"
+        ),
+    )
+    repair.add_argument(
+        "--json",
+        action="store_true",
+        help="emit complete typed repair, investigation, and proof evidence",
     )
     return parser
 
@@ -218,6 +254,45 @@ def run(argv: Sequence[str] | None = None) -> int:
                 print(f"- result: {result.message}")
         return exit_code_for(result.outcome)
 
+    if args.command == "repair-local":
+        try:
+            provider_config = RepairProviderConfig(
+                aws_profile=args.aws_profile,
+                region=args.region,
+                model_id=args.model_id,
+                provider_cost_acknowledged=args.acknowledge_provider_cost,
+                credential_identity_verified=(
+                    args.confirm_verified_temporary_non_root_credentials
+                ),
+            )
+        except ValidationError as exc:
+            fields = sorted(
+                {
+                    str(error["loc"][0])
+                    for error in exc.errors(include_url=False, include_input=False)
+                    if error.get("loc")
+                }
+            )
+            return _print_repair_config_block(args.json, fields)
+        result = repair_local(args.repo, provider_config)
+        if args.json:
+            print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        else:
+            print(
+                "FirstRun local repair: "
+                f"{result.state.value} ({result.outcome.value})"
+            )
+            if result.source_revision:
+                print(f"- source revision: {result.source_revision}")
+            if result.agent is not None:
+                print(f"- agent attempts: {result.agent.attempts_used}")
+                print(f"- tool calls: {len(result.agent.tool_calls)}")
+            if result.candidate is not None:
+                print(f"- candidate: {result.candidate.patch_digest}")
+                print(f"- candidate tree: {result.candidate.candidate_tree_digest}")
+            print(f"- result: {result.message}")
+        return result.exit_code
+
     raise AssertionError(f"unhandled command: {args.command}")  # pragma: no cover
 
 
@@ -281,6 +356,34 @@ def _print_strands_policy_block(
     else:
         print(f"FirstRun Strands preflight: {Outcome.POLICY_BLOCKED.value}")
         print(f"- error: {message}")
+    return exit_code
+
+
+def _print_repair_config_block(as_json: bool, fields: list[str]) -> int:
+    message = "repair provider configuration is invalid"
+    if fields:
+        message += ": " + ", ".join(fields)
+    exit_code = exit_code_for(Outcome.POLICY_BLOCKED)
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "state": "blocked",
+                    "outcome": Outcome.POLICY_BLOCKED.value,
+                    "exit_code": exit_code,
+                    "message": message,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        print(
+            "FirstRun local repair: "
+            f"blocked ({Outcome.POLICY_BLOCKED.value})"
+        )
+        print(f"- result: {message}")
     return exit_code
 
 

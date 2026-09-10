@@ -7,6 +7,7 @@ from .docker import (
     prepare_docker_runtime,
     run_docker_phase,
 )
+from .investigation import DockerInvestigationSession, InvestigationEvidence
 
 __all__ = [
     "DockerPhaseResult",
@@ -14,4 +15,6 @@ __all__ = [
     "WorkerProblem",
     "prepare_docker_runtime",
     "run_docker_phase",
+    "DockerInvestigationSession",
+    "InvestigationEvidence",
 ]
