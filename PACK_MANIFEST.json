@@ -1,0 +1,190 @@
+{
+  "project": "FirstRun",
+  "pack_version": "2.0",
+  "created_date": "2026-09-09",
+  "supersedes": "FirstRun-Codex-Pack.zip (v1)",
+  "artifact_status": "implementation specifications plus controlled fixture and reference checks; not the FirstRun application",
+  "entrypoints": [
+    "AGENTS.md",
+    "START_HERE.md",
+    "TOMORROW.md"
+  ],
+  "validation_report": "VALIDATION_REPORT.md",
+  "files": [
+    {
+      "path": ".gitignore",
+      "bytes": 214,
+      "sha256": "927c74d330a66d45610e68c0ab915638d1b09a7572fe58c756fd51aba99fa01e"
+    },
+    {
+      "path": "AGENTS.md",
+      "bytes": 3659,
+      "sha256": "4043eddf6fc9be876c3c00f790c944800765d7ca6445c52c75c7a49494b663b0"
+    },
+    {
+      "path": "START_HERE.md",
+      "bytes": 2613,
+      "sha256": "b2d7d2a0cee4ee0d35095584d9d52e0bd70162a698d106b6cb0143c469fb346a"
+    },
+    {
+      "path": "STATUS.md",
+      "bytes": 1284,
+      "sha256": "8ffe6e8338c769cb370e7ee7a0657235b23b33bb12136fd27875e64b9994c19a"
+    },
+    {
+      "path": "TOMORROW.md",
+      "bytes": 5384,
+      "sha256": "5ffbf92ca6bd9b8b2c7d138a3e93ae2ace362062895c5069d0d883d0cf718cc6"
+    },
+    {
+      "path": "VALIDATION_REPORT.md",
+      "bytes": 2090,
+      "sha256": "d146887ab6ed94d13a7fa5f1b6f793e7d2dbd75ccdd0eb4624b1a247d2bfc489"
+    },
+    {
+      "path": "docs/AGENT_AND_EVALS.md",
+      "bytes": 4303,
+      "sha256": "dfe26994e03ab28cf75a7d4d1350ac5f8d84332731a19b88f3a9038f96474457"
+    },
+    {
+      "path": "docs/ARCHITECTURE.md",
+      "bytes": 5735,
+      "sha256": "82411f02dc8de6dcc0644e71d181c179d37d5def33fee16bc301a68ce3b3d341"
+    },
+    {
+      "path": "docs/BUILD_PLAN.md",
+      "bytes": 4665,
+      "sha256": "fc2e2f2246df9ed6dadaa1e41bb69a952dd624cc820141a8eba62b1856322dea"
+    },
+    {
+      "path": "docs/CONTRACTS.md",
+      "bytes": 6368,
+      "sha256": "ceec97a565167330d46759e85c53d2faf61211ae8b41744bff5d92b1457201c8"
+    },
+    {
+      "path": "docs/GITHUB_AND_UX.md",
+      "bytes": 2757,
+      "sha256": "f18f67be68fd85c4a86b9dd084f2d818214ae37992fc944b55f6bc3291bfa704"
+    },
+    {
+      "path": "docs/PRODUCT.md",
+      "bytes": 4227,
+      "sha256": "7aaf1dd5f8a3f9b17ed539e40d3f1a85d201f244e41aae2cc3e2c3509f2c6401"
+    },
+    {
+      "path": "docs/SECURITY.md",
+      "bytes": 5619,
+      "sha256": "fa11642db801602a5176682e79e69c9f845dfe0387cac99617bf8b8ec3895b09"
+    },
+    {
+      "path": "docs/SOURCES_AND_RULES.md",
+      "bytes": 3421,
+      "sha256": "3cccd65b45adccc1ad0c3d74adf626ce4c94567e4e059972533a9865c1319519"
+    },
+    {
+      "path": "docs/V1_AUDIT.md",
+      "bytes": 3025,
+      "sha256": "ccb76743690063e261e6d99b7117cc95cf34d470f7ffe9dea660388620715d24"
+    },
+    {
+      "path": "examples/README.md",
+      "bytes": 613,
+      "sha256": "606a0cc4061107afefa98cea3f66d199e1c8a42246bb1181f66ed040ae57d98f"
+    },
+    {
+      "path": "examples/recipe.fixed.json",
+      "bytes": 531,
+      "sha256": "8951ab0c9f83acb532e0fbd4f4150b1e6946615437695eb8a0a5b197142274e4"
+    },
+    {
+      "path": "fixtures/README.md",
+      "bytes": 921,
+      "sha256": "122c64dae3e9164f847349bfd47db56013e66c5fa18d97db63fa7af072cad221"
+    },
+    {
+      "path": "fixtures/notes-app/.firstrun/recipe.json",
+      "bytes": 373,
+      "sha256": "345ccb6e686097fa3e7fdc16406afe48a356c1f346ff3c513f5e1b6f89161c99"
+    },
+    {
+      "path": "fixtures/notes-app/.firstrun/target.json",
+      "bytes": 334,
+      "sha256": "8b32ac0eb97596eb68c5d5cffe54779563504535cfba29f70ad15d82438f202a"
+    },
+    {
+      "path": "fixtures/notes-app/.gitignore",
+      "bytes": 27,
+      "sha256": "7f9e45617d21701c928ff13fbe6806c79d3b285bcf3f922ac0b98758436411cd"
+    },
+    {
+      "path": "fixtures/notes-app/README.md",
+      "bytes": 515,
+      "sha256": "0e5af2442d61a216195a31a8a1a008c6a96770e8e902788b43259a5a21e191b2"
+    },
+    {
+      "path": "fixtures/notes-app/package-lock.json",
+      "bytes": 263,
+      "sha256": "5d626c55b8616e04af3ad97357cfd2ca816595ba237b2c5d1f248e6df0b4fb59"
+    },
+    {
+      "path": "fixtures/notes-app/package.json",
+      "bytes": 337,
+      "sha256": "cbf89b2696703500aa199fb2a7f753344beab72f21b998736862cfd4f0f13837"
+    },
+    {
+      "path": "fixtures/notes-app/scripts/migrate.mjs",
+      "bytes": 446,
+      "sha256": "77e4b873e24a5eb655261510472e4c16d33ef24fd6474f89274fe5e74f6245f0"
+    },
+    {
+      "path": "fixtures/notes-app/src/server.mjs",
+      "bytes": 2450,
+      "sha256": "f7b46201b73d7e7d0e7491d18cdcdd1a31faad8b6a7f7ef641e75e641422b1e2"
+    },
+    {
+      "path": "prompts/01-plan.md",
+      "bytes": 1140,
+      "sha256": "c51f7e5f19619b257c06d6fe212d0791318896522299e7bfee9ae05ec6e0208b"
+    },
+    {
+      "path": "prompts/02-build.md",
+      "bytes": 1023,
+      "sha256": "094506c28a9d6ed684eef676beceec9c739475e2f8126c79b3635cc9009e4330"
+    },
+    {
+      "path": "prompts/03-review.md",
+      "bytes": 1059,
+      "sha256": "c720a1b25a00e2ec04f4a80c600b38e2b40d373957840aed25d77a418707df5f"
+    },
+    {
+      "path": "schemas/recipe.schema.json",
+      "bytes": 1487,
+      "sha256": "01d8520eb4abedb1609d1a0aa6097ef0cfbc1bfdca5a2afa5fb36c34658bddad"
+    },
+    {
+      "path": "schemas/target.schema.json",
+      "bytes": 1920,
+      "sha256": "0a69f3be1112b44b0132c24032586b7ad18da068294f167b95ad5448d360bdbd"
+    },
+    {
+      "path": "spec-tests/acceptance_matrix.json",
+      "bytes": 3205,
+      "sha256": "59aa4b279143dedc102e39e19014423abfe654d280b8c0d765c38534748459b6"
+    },
+    {
+      "path": "tools/check_pack.py",
+      "bytes": 6394,
+      "sha256": "8e4da37de9bd8c726221a9c865a6baa0b30c75b4e5e98578960e9a1f61725127"
+    },
+    {
+      "path": "tools/probe_notes.py",
+      "bytes": 2497,
+      "sha256": "ae805c47bba9626b4a5be0747ba91cd1cd2f3a8a22a7ce37b8a32b26408f5f74"
+    },
+    {
+      "path": "tools/render_recipe.py",
+      "bytes": 4501,
+      "sha256": "d1787f3e7e1a28511480afd00c4f50c8f6bc8d634ba62b51f2118df7ca4975fa"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+# FirstRun working files; no credentials or generated evidence in public source.
+.venv/
+__pycache__/
+*.pyc
+node_modules/
+.next/
+.env
+.env.*
+!.env.example
+artifacts/
+.local/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.pem

@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FirstRun Target v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "runtime",
+    "network",
+    "app_port",
+    "readiness",
+    "acceptance"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "image_ref",
+        "platform"
+      ],
+      "properties": {
+        "image_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "platform": {
+          "enum": [
+            "linux/amd64",
+            "linux/arm64"
+          ]
+        }
+      }
+    },
+    "network": {
+      "const": "none"
+    },
+    "app_port": {
+      "type": "integer",
+      "minimum": 1024,
+      "maximum": 65535
+    },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "status",
+        "timeout_seconds"
+      ],
+      "properties": {
+        "path": {
+          "const": "/health"
+        },
+        "status": {
+          "const": 200
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120
+        }
+      }
+    },
+    "acceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "verifier_id",
+        "timeout_seconds"
+      ],
+      "properties": {
+        "verifier_id": {
+          "const": "notes-create-read-v1"
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120
+        }
+      }
+    }
+  },
+  "$comment": "Controlled first lane only. Controller resolves image digest once per case and snapshots approved target/probe/policy outside repository control. Registry access/custom probes require a deliberate versioned extension."
+}

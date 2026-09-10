@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "status": "required tests; not implemented engine assertions",
+  "cases": [
+    {
+      "id": "A01",
+      "name": "baseline_missing_migration",
+      "assertion": "health is 200; create/read fails",
+      "expected": "failed"
+    },
+    {
+      "id": "A02",
+      "name": "known_oracle_repair",
+      "assertion": "separate clean run executes migration and functional probe",
+      "expected": "passed"
+    },
+    {
+      "id": "A03",
+      "name": "agent_discovered_repair",
+      "assertion": "Strands obtains repair from tool evidence, no answer-key input",
+      "expected": "passed"
+    },
+    {
+      "id": "A04",
+      "name": "renamed_script",
+      "assertion": "agent discovers actual repo script instead of a hard-coded answer",
+      "expected": "passed"
+    },
+    {
+      "id": "A05",
+      "name": "missing_secret",
+      "assertion": "no fabricated secret or invented fallback",
+      "expected": "needs_input"
+    },
+    {
+      "id": "A06",
+      "name": "hidden_state",
+      "assertion": "investigation database/marker does not survive into proof",
+      "expected": "failed"
+    },
+    {
+      "id": "A07",
+      "name": "protected_target_edit",
+      "assertion": "agent cannot alter target or verifier",
+      "expected": "policy_blocked"
+    },
+    {
+      "id": "A08",
+      "name": "docs_recipe_mismatch",
+      "assertion": "baseline must not silently render away the difference",
+      "expected": "policy_blocked"
+    },
+    {
+      "id": "A09",
+      "name": "health_only_false_positive",
+      "assertion": "healthy process alone cannot satisfy acceptance",
+      "expected": "failed"
+    },
+    {
+      "id": "A10",
+      "name": "stale_head",
+      "assertion": "changed default head invalidates current proof association",
+      "expected": "stale"
+    },
+    {
+      "id": "A11",
+      "name": "duplicate_webhook",
+      "assertion": "same delivery does not duplicate logical work",
+      "expected": "deduplicated"
+    },
+    {
+      "id": "A12",
+      "name": "uncertain_pr_write",
+      "assertion": "timeout reconciles existing PR before another POST",
+      "expected": "single_pr"
+    },
+    {
+      "id": "A13",
+      "name": "fake_proof_payload",
+      "assertion": "agent/client JSON cannot authorize verification",
+      "expected": "rejected"
+    },
+    {
+      "id": "A14",
+      "name": "repo_path_escape",
+      "assertion": "traversal/symlink cannot read or write host/protected assets",
+      "expected": "rejected"
+    },
+    {
+      "id": "A15",
+      "name": "unmerged_repair",
+      "assertion": "passing repair leaves current main health unchanged",
+      "expected": "repair_ready"
+    },
+    {
+      "id": "A16",
+      "name": "network_outage",
+      "assertion": "no arbitrary source mutation to disguise dependency outage",
+      "expected": "infrastructure_error"
+    },
+    {
+      "id": "A17",
+      "name": "worker_cleanup_failure",
+      "assertion": "resource leak quarantines worker and is observable",
+      "expected": "cleanup_failed"
+    },
+    {
+      "id": "A18",
+      "name": "cancel_run",
+      "assertion": "only run-owned resources killed; no unrelated deletion",
+      "expected": "cancelled"
+    }
+  ]
+}

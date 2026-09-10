@@ -1,0 +1,14 @@
+{
+  "name": "firstrun-notes-fixture",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Controlled synthetic FirstRun acceptance fixture; not a deployed product.",
+  "engines": {
+    "node": ">=22.16.0"
+  },
+  "scripts": {
+    "dev": "node src/server.mjs",
+    "db:migrate": "node scripts/migrate.mjs"
+  }
+}

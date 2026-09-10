@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "steps": [
+    {
+      "id": "install",
+      "argv": [
+        "npm",
+        "ci",
+        "--offline",
+        "--no-audit",
+        "--no-fund"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 60
+    },
+    {
+      "id": "migrate",
+      "argv": [
+        "npm",
+        "run",
+        "db:migrate"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 30
+    }
+  ],
+  "start": {
+    "id": "start",
+    "argv": [
+      "npm",
+      "run",
+      "dev"
+    ],
+    "cwd": ".",
+    "timeout_seconds": 60
+  }
+}

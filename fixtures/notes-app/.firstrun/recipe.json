@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "steps": [
+    {
+      "id": "install",
+      "argv": [
+        "npm",
+        "ci",
+        "--offline",
+        "--no-audit",
+        "--no-fund"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 60
+    }
+  ],
+  "start": {
+    "id": "start",
+    "argv": [
+      "npm",
+      "run",
+      "dev"
+    ],
+    "cwd": ".",
+    "timeout_seconds": 60
+  }
+}

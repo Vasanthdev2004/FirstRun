@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "runtime": {
+    "image_ref": "node:22-bookworm-slim",
+    "platform": "linux/amd64"
+  },
+  "network": "none",
+  "app_port": 3000,
+  "readiness": {
+    "path": "/health",
+    "status": 200,
+    "timeout_seconds": 30
+  },
+  "acceptance": {
+    "verifier_id": "notes-create-read-v1",
+    "timeout_seconds": 15
+  }
+}
