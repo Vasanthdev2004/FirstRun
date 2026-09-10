@@ -76,6 +76,8 @@ def passing_observation(authority: ControllerBinding) -> ControllerObservation:
         verifier_container_id="d" * 64,
         fresh_state=FreshStateEvidence(
             workspace_created_for_attempt=True,
+            preexisting_workspace_marker_absent=True,
+            workspace_marker_digest=digest("9"),
             mutable_state_reused=False,
             shared_mutable_resource_ids=(),
             only_immutable_image_layers_reused=True,
@@ -120,8 +122,11 @@ def passing_observation(authority: ControllerBinding) -> ControllerObservation:
         ),
         cleanup=CleanupEvidence(
             attempted=True,
+            app_container_created=True,
             app_container_removed=True,
+            verifier_container_created=True,
             verifier_container_removed=True,
+            workspace_created=True,
             workspace_removed=True,
             run_owned_resources_only=True,
             worker_quarantined=False,
@@ -185,6 +190,11 @@ class RunEvidenceTests(unittest.TestCase):
             {"policy_authorized": False},
             {"commands": (failed_command, original.commands[1])},
             {"cleanup": incomplete_cleanup},
+            {
+                "fresh_state": original.fresh_state.model_copy(
+                    update={"preexisting_workspace_marker_absent": False}
+                )
+            },
         )
 
         for update in changes:
@@ -279,6 +289,20 @@ class RunEvidenceTests(unittest.TestCase):
         payload["verifier_container_id"] = payload["app_container_id"]
         with self.assertRaises(ValidationError):
             ControllerObservation.model_validate(payload)
+
+    def test_cleanup_rejects_removed_resources_that_were_never_created(self) -> None:
+        with self.assertRaises(ValidationError):
+            CleanupEvidence(
+                attempted=True,
+                app_container_created=False,
+                app_container_removed=True,
+                verifier_container_created=False,
+                verifier_container_removed=False,
+                workspace_created=False,
+                workspace_removed=False,
+                run_owned_resources_only=True,
+                worker_quarantined=False,
+            )
 
     def test_logs_are_bounded_and_models_forbid_coercion_and_extras(self) -> None:
         with self.assertRaises(ValidationError):

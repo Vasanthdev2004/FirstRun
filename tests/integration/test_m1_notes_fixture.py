@@ -76,6 +76,17 @@ class NotesFixtureM1AcceptanceTests(unittest.TestCase):
         self.assertIs(baseline.acceptance_probe.outcome, Outcome.FAILED)
         self.assertNotEqual(baseline.workspace_id, self.oracle.proof.workspace_id)
 
+    def test_predecessor_marker_is_absent_in_each_fresh_workspace(self) -> None:
+        baseline = self.oracle.baseline
+        proof = self.oracle.proof
+        assert baseline is not None and proof is not None
+        self.assertTrue(baseline.fresh_state.preexisting_workspace_marker_absent)
+        self.assertTrue(proof.fresh_state.preexisting_workspace_marker_absent)
+        self.assertNotEqual(
+            baseline.fresh_state.workspace_marker_digest,
+            proof.fresh_state.workspace_marker_digest,
+        )
+
     def test_exact_cleanup_left_no_m1_container_residue(self) -> None:
         docker = shutil.which("docker")
         self.assertIsNotNone(docker)

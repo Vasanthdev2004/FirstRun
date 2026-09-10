@@ -201,20 +201,43 @@ class CleanupEvidence(_FrozenEvidence):
     """Exact-resource cleanup and worker-reuse decision."""
 
     attempted: bool
+    app_container_created: bool
     app_container_removed: bool
+    verifier_container_created: bool
     verifier_container_removed: bool
+    workspace_created: bool
     workspace_removed: bool
     run_owned_resources_only: bool
     worker_quarantined: bool
     sanitized_errors: Annotated[tuple[SanitizedError, ...], Field(max_length=32)] = ()
 
+    @model_validator(mode="after")
+    def resource_lifecycle_is_coherent(self) -> Self:
+        pairs = (
+            (self.app_container_created, self.app_container_removed, "app container"),
+            (
+                self.verifier_container_created,
+                self.verifier_container_removed,
+                "verifier container",
+            ),
+            (self.workspace_created, self.workspace_removed, "workspace"),
+        )
+        for created, removed, resource in pairs:
+            if removed and not created:
+                raise ValueError(f"{resource} cannot be removed when it was not created")
+        if self.verifier_container_created and not self.app_container_created:
+            raise ValueError("verifier container requires an app container")
+        if self.workspace_created and not self.app_container_created:
+            raise ValueError("workspace requires an app container")
+        return self
+
     @property
     def succeeded(self) -> bool:
         return (
             self.attempted
-            and self.app_container_removed
-            and self.verifier_container_removed
-            and self.workspace_removed
+            and (not self.app_container_created or self.app_container_removed)
+            and (not self.verifier_container_created or self.verifier_container_removed)
+            and (not self.workspace_created or self.workspace_removed)
             and self.run_owned_resources_only
             and not self.worker_quarantined
             and not self.sanitized_errors
@@ -225,6 +248,8 @@ class FreshStateEvidence(_FrozenEvidence):
     """Controller assertion about the provenance of mutable run state."""
 
     workspace_created_for_attempt: bool
+    preexisting_workspace_marker_absent: bool
+    workspace_marker_digest: ContentDigest
     mutable_state_reused: bool
     shared_mutable_resource_ids: Annotated[tuple[IdentifierText, ...], Field(max_length=32)] = ()
     only_immutable_image_layers_reused: bool
@@ -233,6 +258,7 @@ class FreshStateEvidence(_FrozenEvidence):
     def satisfied(self) -> bool:
         return (
             self.workspace_created_for_attempt
+            and self.preexisting_workspace_marker_absent
             and not self.mutable_state_reused
             and not self.shared_mutable_resource_ids
             and self.only_immutable_image_layers_reused
@@ -240,6 +266,83 @@ class FreshStateEvidence(_FrozenEvidence):
 
 
 RunPhase = Literal["baseline", "proof"]
+
+
+class AttemptEvidence(_FrozenEvidence):
+    """Typed partial evidence retained even when a phase cannot reach its probe."""
+
+    schema_version: Literal[1] = 1
+    evidence_source: Literal["trusted_local_controller"] = "trusted_local_controller"
+    phase: RunPhase
+    run_id: UUID
+    attempt_id: UUID
+    workspace_id: UUID
+    base_commit: GitObjectId
+    base_git_tree: GitObjectId
+    source_git_tree: GitObjectId
+    base_tree_digest: ContentDigest
+    base_archive_digest: ContentDigest
+    candidate_digest: ContentDigest | None
+    candidate_tree_digest: ContentDigest | None
+    target_reference: RelativeReference
+    target_digest: ContentDigest
+    recipe_reference: RelativeReference
+    recipe_digest: ContentDigest
+    readme_reference: RelativeReference
+    readme_digest: ContentDigest
+    verifier_id: IdentifierText
+    verifier_digest: ContentDigest
+    policy_revision: IdentifierText
+    policy_digest: ContentDigest
+    app_runtime: RuntimeImageEvidence
+    verifier_runtime: RuntimeImageEvidence
+    app_container_id: ContainerId | None
+    verifier_container_id: ContainerId | None
+    workspace_marker_digest: ContentDigest | None = None
+    commands: Annotated[tuple[CommandEvidence, ...], Field(max_length=13)] = ()
+    readiness: ReadinessEvidence | None = None
+    acceptance_probe: AcceptanceProbeEvidence | None = None
+    cleanup: CleanupEvidence
+    outcome: Outcome
+    sanitized_errors: Annotated[tuple[SanitizedError, ...], Field(max_length=32)] = ()
+
+    _target_reference_is_relative = field_validator("target_reference")(
+        _validate_relative_reference
+    )
+    _recipe_reference_is_relative = field_validator("recipe_reference")(
+        _validate_relative_reference
+    )
+    _readme_reference_is_relative = field_validator("readme_reference")(
+        _validate_relative_reference
+    )
+
+    @model_validator(mode="after")
+    def binding_and_phase_are_coherent(self) -> Self:
+        if len({self.run_id, self.attempt_id, self.workspace_id}) != 3:
+            raise ValueError("run, attempt, and workspace IDs must be distinct")
+        if self.app_container_id is not None and self.app_container_id == self.verifier_container_id:
+            raise ValueError("app and verifier containers must be distinct")
+        if self.verifier_container_id is not None and self.app_container_id is None:
+            raise ValueError("verifier container requires an app container")
+        if self.cleanup.app_container_created != (self.app_container_id is not None):
+            raise ValueError("app container identity and cleanup evidence disagree")
+        if self.cleanup.verifier_container_created != (self.verifier_container_id is not None):
+            raise ValueError("verifier container identity and cleanup evidence disagree")
+        if self.workspace_marker_digest is not None and not self.cleanup.workspace_created:
+            raise ValueError("workspace marker requires a created workspace")
+        if self.readiness is not None and self.verifier_container_id is None:
+            raise ValueError("readiness evidence requires a verifier container")
+        if self.acceptance_probe is not None and self.verifier_container_id is None:
+            raise ValueError("acceptance evidence requires a verifier container")
+        if self.phase == "baseline" and (
+            self.candidate_digest is not None or self.candidate_tree_digest is not None
+        ):
+            raise ValueError("baseline attempt cannot have candidate digests")
+        if self.phase == "proof" and (
+            self.candidate_digest is None or self.candidate_tree_digest is None
+        ):
+            raise ValueError("proof attempt requires candidate digests")
+        return self
 
 
 class _RunObservationFields(_FrozenEvidence):
@@ -313,6 +416,12 @@ class _RunObservationFields(_FrozenEvidence):
             raise ValueError("run evidence requires at least one foreground command")
         if self.app_container_id == self.verifier_container_id:
             raise ValueError("app and verifier containers must be distinct")
+        if not (
+            self.cleanup.app_container_created
+            and self.cleanup.verifier_container_created
+            and self.cleanup.workspace_created
+        ):
+            raise ValueError("complete run evidence requires all run resources")
         return self
 
 
@@ -369,6 +478,9 @@ class RunEvidence(_RunObservationFields):
             and self.acceptance_probe.succeeded
             and self.acceptance_probe.verifier_id == self.verifier_id
             and self.acceptance_probe.verifier_digest == self.verifier_digest
+            and self.cleanup.app_container_created
+            and self.cleanup.verifier_container_created
+            and self.cleanup.workspace_created
             and self.cleanup.succeeded
         )
 

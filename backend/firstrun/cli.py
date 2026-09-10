@@ -207,6 +207,13 @@ def run(argv: Sequence[str] | None = None) -> int:
                     f"{result.baseline.acceptance_probe.outcome.value}"
                 )
                 print(f"- cleanup: {'passed' if result.baseline.cleanup.succeeded else 'failed'}")
+            elif result.baseline_attempt is not None:
+                print(f"- attempt ID: {result.baseline_attempt.attempt_id}")
+                print(f"- attempt outcome: {result.baseline_attempt.outcome.value}")
+                print(
+                    "- cleanup: "
+                    f"{'passed' if result.baseline_attempt.cleanup.succeeded else 'failed'}"
+                )
             if result.message:
                 print(f"- result: {result.message}")
         return exit_code_for(result.outcome)

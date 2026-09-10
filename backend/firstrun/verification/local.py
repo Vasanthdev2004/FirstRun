@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import json
-import os
-import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
-from firstrun.domain.contracts import ContractFileError, Recipe, Target, load_target
-from firstrun.domain.evidence import RunEvidence
+from firstrun.domain.contracts import Recipe, Target
+from firstrun.domain.evidence import AttemptEvidence, RunEvidence
 from firstrun.domain.outcomes import Outcome
 from firstrun.verification.policy import (
     CONTROLLED_NODE_FIXTURE_POLICY,
@@ -42,6 +40,8 @@ class LocalVerificationResult:
     source_revision: str | None
     baseline: RunEvidence | None
     proof: RunEvidence | None = None
+    baseline_attempt: AttemptEvidence | None = None
+    proof_attempt: AttemptEvidence | None = None
     candidate_digest: str | None = None
     candidate_tree_digest: str | None = None
     message: str | None = None
@@ -63,6 +63,16 @@ class LocalVerificationResult:
                 self.baseline.model_dump(mode="json") if self.baseline is not None else None
             ),
             "proof": self.proof.model_dump(mode="json") if self.proof is not None else None,
+            "baseline_attempt": (
+                self.baseline_attempt.model_dump(mode="json")
+                if self.baseline_attempt is not None
+                else None
+            ),
+            "proof_attempt": (
+                self.proof_attempt.model_dump(mode="json")
+                if self.proof_attempt is not None
+                else None
+            ),
         }
 
 
@@ -74,7 +84,9 @@ def verify_local(repo: Path, target_path: Path) -> LocalVerificationResult:
         return prepared
     snapshot, target, baseline_recipe = prepared
     try:
-        runtime = prepare_docker_runtime(target)
+        runtime = prepare_docker_runtime(
+            target, controller_repository_root=snapshot.repository_root
+        )
     except WorkerProblem as exc:
         return _early_result(exc.outcome, snapshot, str(exc))
     baseline = run_docker_phase(
@@ -116,7 +128,9 @@ def verify_known_oracle(
                 CONTROLLED_NODE_FIXTURE_POLICY.readme_path: fixed_readme,
             },
         )
-        runtime = prepare_docker_runtime(target)
+        runtime = prepare_docker_runtime(
+            target, controller_repository_root=snapshot.repository_root
+        )
     except (ContractFileError, ValidationError, SourcePolicyError) as exc:
         return _early_result(Outcome.POLICY_BLOCKED, snapshot, str(exc))
     except (OSError, SourceInfrastructureError) as exc:
@@ -131,11 +145,17 @@ def verify_known_oracle(
         baseline_recipe,
         phase="baseline",
     )
-    if baseline_phase.outcome is not Outcome.FAILED or baseline_phase.evidence is None:
+    if not _is_expected_known_broken_baseline(baseline_phase):
+        inconsistent_result = baseline_phase.outcome in {Outcome.PASSED, Outcome.FAILED}
         return LocalVerificationResult(
-            outcome=baseline_phase.outcome,
+            outcome=(
+                Outcome.INFRASTRUCTURE_ERROR
+                if inconsistent_result
+                else baseline_phase.outcome
+            ),
             source_revision=snapshot.base_commit,
             baseline=baseline_phase.evidence,
+            baseline_attempt=baseline_phase.attempt,
             candidate_digest=candidate.patch_digest,
             candidate_tree_digest=candidate.candidate_tree_digest,
             message=(
@@ -154,11 +174,18 @@ def verify_known_oracle(
     )
     proof = proof_phase.evidence
     if proof_phase.outcome is not Outcome.PASSED or proof is None or not proof.verified:
+        inconsistent_pass = proof_phase.outcome is Outcome.PASSED
         return LocalVerificationResult(
-            outcome=proof_phase.outcome,
+            outcome=(
+                Outcome.INFRASTRUCTURE_ERROR
+                if inconsistent_pass
+                else proof_phase.outcome
+            ),
             source_revision=snapshot.base_commit,
             baseline=baseline_phase.evidence,
             proof=proof,
+            baseline_attempt=baseline_phase.attempt,
+            proof_attempt=proof_phase.attempt,
             candidate_digest=candidate.patch_digest,
             candidate_tree_digest=candidate.candidate_tree_digest,
             message=proof_phase.error or "fresh proof did not satisfy the verified predicate",
@@ -178,28 +205,98 @@ def verify_known_oracle(
             source_revision=snapshot.base_commit,
             baseline=baseline_evidence,
             proof=proof,
+            baseline_attempt=baseline_phase.attempt,
+            proof_attempt=proof_phase.attempt,
             candidate_digest=candidate.patch_digest,
             candidate_tree_digest=candidate.candidate_tree_digest,
             message="baseline and proof did not have independent mutable identities",
         )
-    if baseline_evidence.target_digest != proof.target_digest:
+    frozen_baseline = (
+        baseline_evidence.base_commit,
+        baseline_evidence.base_git_tree,
+        baseline_evidence.source_git_tree,
+        baseline_evidence.base_tree_digest,
+        baseline_evidence.base_archive_digest,
+        baseline_evidence.target_reference,
+        baseline_evidence.target_digest,
+        baseline_evidence.verifier_id,
+        baseline_evidence.verifier_digest,
+        baseline_evidence.policy_revision,
+        baseline_evidence.policy_digest,
+        baseline_evidence.app_runtime,
+        baseline_evidence.verifier_runtime,
+    )
+    frozen_proof = (
+        proof.base_commit,
+        proof.base_git_tree,
+        proof.source_git_tree,
+        proof.base_tree_digest,
+        proof.base_archive_digest,
+        proof.target_reference,
+        proof.target_digest,
+        proof.verifier_id,
+        proof.verifier_digest,
+        proof.policy_revision,
+        proof.policy_digest,
+        proof.app_runtime,
+        proof.verifier_runtime,
+    )
+    candidate_matches = (
+        str(proof.candidate_digest) == candidate.patch_digest
+        and str(proof.candidate_tree_digest) == candidate.candidate_tree_digest
+    )
+    if frozen_baseline != frozen_proof or not candidate_matches:
         return LocalVerificationResult(
-            outcome=Outcome.POLICY_BLOCKED,
+            outcome=Outcome.INFRASTRUCTURE_ERROR,
             source_revision=snapshot.base_commit,
             baseline=baseline_evidence,
             proof=proof,
+            baseline_attempt=baseline_phase.attempt,
+            proof_attempt=proof_phase.attempt,
             candidate_digest=candidate.patch_digest,
             candidate_tree_digest=candidate.candidate_tree_digest,
-            message="proof target differs from the immutable baseline target",
+            message="proof evidence differs from the frozen case or exact candidate",
         )
     return LocalVerificationResult(
         outcome=Outcome.PASSED,
         source_revision=snapshot.base_commit,
         baseline=baseline_evidence,
         proof=proof,
+        baseline_attempt=baseline_phase.attempt,
+        proof_attempt=proof_phase.attempt,
         candidate_digest=candidate.patch_digest,
         candidate_tree_digest=candidate.candidate_tree_digest,
         message="broken baseline reproduced and exact candidate passed an independent fresh proof",
+    )
+
+
+def _is_expected_known_broken_baseline(phase: DockerPhaseResult) -> bool:
+    """Require a complete, trusted functional failure before attempting proof."""
+
+    evidence = phase.evidence
+    return bool(
+        phase.outcome is Outcome.FAILED
+        and evidence is not None
+        and evidence.phase == "baseline"
+        and evidence.outcome is Outcome.FAILED
+        and not evidence.sanitized_errors
+        and evidence.policy_authorized
+        and evidence.fresh_state.satisfied
+        and evidence.target_digest == evidence.observed_target_digest
+        and evidence.recipe_digest == evidence.executed_recipe_digest
+        and evidence.readme_digest == evidence.rendered_readme_digest
+        and evidence.verifier_digest == evidence.observed_verifier_digest
+        and evidence.policy_digest == evidence.observed_policy_digest
+        and all(command.succeeded for command in evidence.commands)
+        and evidence.readiness.succeeded
+        and evidence.acceptance_probe.outcome is Outcome.FAILED
+        and not evidence.acceptance_probe.succeeded
+        and evidence.acceptance_probe.verifier_id == evidence.verifier_id
+        and evidence.acceptance_probe.verifier_digest == evidence.verifier_digest
+        and evidence.cleanup.app_container_created
+        and evidence.cleanup.verifier_container_created
+        and evidence.cleanup.workspace_created
+        and evidence.cleanup.succeeded
     )
 
 
@@ -216,19 +313,12 @@ def _prepare_inputs(
             raise SourcePolicyError(
                 "--target must name <approved-repo>/.firstrun/target.json exactly"
             )
-        _assert_regular_plain_file(requested_target)
         snapshot = capture_approved_source(requested_repo, approved_repo=approved_repo)
-        target = load_target(requested_target)
-        checked_out_target = _read_exact_regular_file(requested_target)
         captured_target = snapshot.content(CONTROLLED_NODE_FIXTURE_POLICY.target_path)
-        if checked_out_target != captured_target:
-            raise SourcePolicyError("requested target bytes differ from the captured Git target")
+        target = Target.model_validate(_load_unique_json(captured_target))
         baseline_recipe = Recipe.model_validate(
             _load_unique_json(snapshot.content(CONTROLLED_NODE_FIXTURE_POLICY.recipe_path))
         )
-        captured_target_model = Target.model_validate(_load_unique_json(captured_target))
-        if target != captured_target_model:
-            raise SourcePolicyError("requested target does not match the captured target model")
         classification = classify_target_tuple(
             image_reference=target.runtime.image_ref,
             platform=target.runtime.platform,
@@ -242,7 +332,7 @@ def _prepare_inputs(
                 "README managed block differs from the committed recipe; execution was blocked"
             )
         return snapshot, target, baseline_recipe
-    except (ContractFileError, ValidationError, SourcePolicyError, UnicodeError, ValueError) as exc:
+    except (ValidationError, SourcePolicyError, UnicodeError, ValueError) as exc:
         return _early_result(Outcome.POLICY_BLOCKED, snapshot, str(exc))
     except (OSError, SourceInfrastructureError) as exc:
         return _early_result(Outcome.INFRASTRUCTURE_ERROR, snapshot, str(exc))
@@ -251,10 +341,21 @@ def _prepare_inputs(
 def _from_phase(
     snapshot: SourceSnapshot, phase: DockerPhaseResult
 ) -> LocalVerificationResult:
+    if phase.outcome is Outcome.PASSED and (
+        phase.evidence is None or not phase.evidence.verified
+    ):
+        return LocalVerificationResult(
+            outcome=Outcome.INFRASTRUCTURE_ERROR,
+            source_revision=snapshot.base_commit,
+            baseline=phase.evidence,
+            baseline_attempt=phase.attempt,
+            message="worker reported pass without complete verified evidence",
+        )
     return LocalVerificationResult(
         outcome=phase.outcome,
         source_revision=snapshot.base_commit,
         baseline=phase.evidence,
+        baseline_attempt=phase.attempt,
         message=phase.error,
     )
 
@@ -270,26 +371,6 @@ def _early_result(
         baseline=None,
         message=message[:4096],
     )
-
-
-def _assert_regular_plain_file(path: Path) -> None:
-    try:
-        before = os.lstat(path)
-    except OSError as exc:
-        raise SourcePolicyError(f"target file could not be inspected: {path}") from exc
-    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    if stat.S_ISLNK(before.st_mode) or getattr(before, "st_file_attributes", 0) & reparse:
-        raise SourcePolicyError("target file must not be a link or reparse point")
-    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
-        raise SourcePolicyError("target file must be one ordinary regular file")
-
-
-def _read_exact_regular_file(path: Path, *, max_bytes: int = 1_048_576) -> bytes:
-    _assert_regular_plain_file(path)
-    content = path.read_bytes()
-    if len(content) > max_bytes:
-        raise SourcePolicyError("trusted input file exceeds its byte limit")
-    return content
 
 
 def _load_unique_json(content: bytes) -> Any:

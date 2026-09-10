@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import signal
 import shutil
 import subprocess
+import threading
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -210,33 +213,103 @@ class SubprocessDockerCliRunner:
                 stderr=f"refused executable beneath an untrusted root: {program_path}",
             )
         execution_argv = [str(program_path), *argv[1:]]
+        process_options: dict[str, object] = {}
+        if os.name == "nt":
+            process_options["creationflags"] = (
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
+        else:
+            process_options["start_new_session"] = True
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 execution_argv,
                 cwd=str(program_path.parent),
                 stdin=subprocess.DEVNULL,
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 shell=False,
-                timeout=timeout_seconds,
+                **process_options,
             )
         except FileNotFoundError as exc:
             return CommandResult(127, stderr=self._clip(str(exc)))
-        except subprocess.TimeoutExpired as exc:
-            return CommandResult(
-                124,
-                self._clip(exc.stdout),
-                self._clip(exc.stderr) or "Docker CLI timed out",
-            )
         except OSError as exc:
             return CommandResult(126, stderr=self._clip(str(exc)))
+        assert process.stdout is not None and process.stderr is not None
+        stdout = bytearray()
+        stderr = bytearray()
+        overflow = threading.Event()
+
+        def drain(stream: object, destination: bytearray) -> None:
+            try:
+                while True:
+                    chunk = stream.read(65_536)  # type: ignore[attr-defined]
+                    if not chunk:
+                        return
+                    remaining = max(0, self._max_output_chars - len(destination))
+                    destination.extend(chunk[:remaining])
+                    if len(chunk) > remaining:
+                        overflow.set()
+                        _terminate_process_tree(process)
+            except (OSError, ValueError):
+                return
+
+        stdout_thread = threading.Thread(
+            target=drain, args=(process.stdout, stdout), daemon=True
+        )
+        stderr_thread = threading.Thread(
+            target=drain, args=(process.stderr, stderr), daemon=True
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        timed_out = False
+        try:
+            returncode = process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            returncode = 124
+            _terminate_process_tree(process)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
+        drains_stuck = stdout_thread.is_alive() or stderr_thread.is_alive()
+        if drains_stuck:
+            _terminate_process_tree(process)
+        for stream in (process.stdout, process.stderr):
+            try:
+                stream.close()
+            except OSError:
+                pass
+        if drains_stuck:
+            stdout_thread.join(timeout=1)
+            stderr_thread.join(timeout=1)
+        decoded_stdout = self._clip(bytes(stdout))
+        decoded_stderr = self._clip(bytes(stderr))
+        if timed_out:
+            return CommandResult(
+                124,
+                decoded_stdout,
+                decoded_stderr or "Docker CLI timed out",
+            )
+        if drains_stuck:
+            return CommandResult(
+                125,
+                decoded_stdout,
+                "Docker CLI output streams did not terminate",
+            )
+        if overflow.is_set():
+            return CommandResult(
+                125,
+                decoded_stdout,
+                "Docker CLI output exceeded its hard byte limit",
+            )
         return CommandResult(
-            completed.returncode,
-            self._clip(completed.stdout),
-            self._clip(completed.stderr),
+            returncode,
+            decoded_stdout,
+            decoded_stderr,
         )
 
     def _clip(self, value: str | bytes | None) -> str:
@@ -248,6 +321,21 @@ class SubprocessDockerCliRunner:
             return value
         marker = "\n...[truncated]"
         return value[: self._max_output_chars - len(marker)] + marker
+
+
+def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Best-effort termination of the isolated Docker CLI process group."""
+
+    process_id = getattr(process, "pid", None)
+    if os.name != "nt" and isinstance(process_id, int):
+        try:
+            os.killpg(process_id, signal.SIGKILL)
+        except OSError:
+            pass
+    try:
+        process.kill()
+    except OSError:
+        pass
 
 
 class _EndpointDockerCliRunner:

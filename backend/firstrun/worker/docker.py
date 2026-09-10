@@ -11,13 +11,17 @@ from __future__ import annotations
 import base64
 import json
 import re
+import threading
+import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
 from firstrun.domain.contracts import Recipe, RecipeStep, Target
 from firstrun.domain.evidence import (
     AcceptanceProbeEvidence,
+    AttemptEvidence,
     CleanupEvidence,
     CommandEvidence,
     ContentDigest,
@@ -38,6 +42,8 @@ from firstrun.preflight.docker import (
     SubprocessDockerCliRunner,
     _EndpointDockerCliRunner,
     _InfrastructureProblem,
+    _PolicyProblem,
+    _UnsupportedProblem,
     _assert_daemon_security,
     _parse_byte_size,
     _resolve_image,
@@ -53,8 +59,8 @@ from firstrun.verification.source import (
     CandidatePatch,
     SourcePolicyError,
     SourceSnapshot,
+    build_candidate_patch,
     file_digests,
-    materialize_source,
 )
 
 
@@ -67,6 +73,9 @@ _CONTAINER_ID = re.compile(r"^[0-9a-f]{12,64}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _MAX_CONTROLLER_ERROR = 4096
 _MAX_COMMAND_TAIL = 8192
+_FRESHNESS_MARKER = "/workspace/.firstrun-m1-freshness-marker"
+_QUARANTINED_ENDPOINTS: set[str] = set()
+_QUARANTINE_LOCK = threading.Lock()
 
 _INSPECT_FORMAT = (
     '{"Id":{{json .Id}},"Image":{{json .Image}},"Config":{'
@@ -118,6 +127,21 @@ for (const [name, encoded] of Object.entries(files)) {
   fs.writeFileSync(destination, content, {mode: 0o644, flag: 'wx'});
 }
 console.log(JSON.stringify({writtenFiles: Object.keys(files).length}));
+"""
+
+_SEED_FRESH_WORKSPACE = """\
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+const marker = process.argv[1];
+const content = Buffer.from(process.argv[2], 'utf8');
+if (fs.existsSync(marker)) {
+  console.log(JSON.stringify({preexistingAbsent: false, markerDigest: null}));
+  process.exitCode = 10;
+} else {
+  fs.writeFileSync(marker, content, {mode: 0o600, flag: 'wx'});
+  const digest = 'sha256:' + crypto.createHash('sha256').update(content).digest('hex');
+  console.log(JSON.stringify({preexistingAbsent: true, markerDigest: digest}));
+}
 """
 
 _RUN_COMMAND = """\
@@ -196,6 +220,30 @@ child.on('close', (code, signal) => {
 function stop() { child.kill('SIGTERM'); }
 process.on('SIGTERM', stop);
 process.on('SIGINT', stop);
+"""
+
+_READ_START_RESULT = """\
+const fs = require('node:fs');
+const wait = Number(process.argv[1]);
+const resultPath = '/tmp/firstrun-start-result.json';
+function inspect() {
+  if (!fs.existsSync(resultPath)) {
+    console.log('{"exists":false}');
+    return;
+  }
+  try {
+    const value = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
+    const validExit = value.exitCode === null || Number.isInteger(value.exitCode);
+    const validSignal = value.signal === undefined || value.signal === null || typeof value.signal === 'string';
+    const validError = value.error === undefined || typeof value.error === 'string';
+    if (!validExit || !validSignal || !validError) throw new Error('invalid fields');
+    console.log(JSON.stringify({exists: true, exitCode: value.exitCode,
+      signal: value.signal ?? null, error: value.error ?? null}));
+  } catch (_) {
+    console.log('{"exists":true,"malformed":true}');
+  }
+}
+setTimeout(inspect, Number.isFinite(wait) && wait >= 0 && wait <= 1000 ? wait : 0);
 """
 
 _HASH_WORKSPACE = """\
@@ -330,6 +378,33 @@ class WorkerProblem(RuntimeError):
         self.outcome = outcome
 
 
+class _DeadlineDockerCliRunner:
+    """Cap every phase operation to one controller-owned monotonic deadline."""
+
+    def __init__(
+        self,
+        delegate: DockerCliRunner,
+        deadline: float,
+        *,
+        clock: Any = time.monotonic,
+    ) -> None:
+        self._delegate = delegate
+        self._deadline = deadline
+        self._clock = clock
+
+    def run(self, argv: Sequence[str], *, timeout_seconds: float) -> CommandResult:
+        remaining = self._deadline - float(self._clock())
+        if remaining <= 0:
+            raise WorkerProblem(Outcome.TIMED_OUT, "M1 phase wall-time budget expired")
+        effective_timeout = min(float(timeout_seconds), remaining)
+        result = self._delegate.run(argv, timeout_seconds=effective_timeout)
+        if float(self._clock()) > self._deadline:
+            raise WorkerProblem(Outcome.TIMED_OUT, "M1 phase wall-time budget expired")
+        if result.returncode == 124 and effective_timeout < float(timeout_seconds):
+            raise WorkerProblem(Outcome.TIMED_OUT, "M1 phase wall-time budget expired")
+        return result
+
+
 @dataclass(frozen=True)
 class PreparedDockerRuntime:
     docker_context: str
@@ -346,11 +421,13 @@ class DockerPhaseResult:
     binding: ControllerBinding
     evidence: RunEvidence | None
     error: str | None = None
+    attempt: AttemptEvidence | None = None
 
 
 def prepare_docker_runtime(
     target: Target,
     *,
+    controller_repository_root: Path,
     runner: DockerCliRunner | None = None,
 ) -> PreparedDockerRuntime:
     """Resolve and inspect the one runtime once for a baseline/proof case."""
@@ -364,9 +441,6 @@ def prepare_docker_runtime(
         raise WorkerProblem(Outcome.UNSUPPORTED, "target is not registered by the M1 policy")
 
     policy = CONTROLLED_NODE_FIXTURE_POLICY
-    base_runner = runner or SubprocessDockerCliRunner(
-        max_output_chars=policy.docker.max_output_bytes
-    )
     os_name, architecture = target.runtime.platform.split("/", 1)
     config = DockerPreflightConfig(
         app_image=target.runtime.image_ref,
@@ -383,15 +457,30 @@ def prepare_docker_runtime(
         command_timeout_seconds=30,
     )
     try:
+        trusted_root = controller_repository_root.resolve(strict=True)
+        base_runner = runner or SubprocessDockerCliRunner(
+            max_output_chars=policy.docker.max_output_bytes,
+            forbidden_roots=(Path.cwd().resolve(), trusted_root),
+        )
         context, endpoint = _resolve_local_docker_endpoint(base_runner, config)
+        if _endpoint_is_quarantined(endpoint):
+            raise WorkerProblem(
+                Outcome.CLEANUP_FAILED,
+                "M1 worker endpoint is quarantined after an earlier cleanup failure",
+            )
         pinned = _EndpointDockerCliRunner(base_runner, config.docker_binary, endpoint)
         server_version = _assert_daemon_security(pinned, config)
         image = _resolve_image(pinned, config, target.runtime.image_ref)
+    except _PolicyProblem as exc:
+        raise WorkerProblem(Outcome.POLICY_BLOCKED, _sanitize(str(exc))) from exc
+    except _UnsupportedProblem as exc:
+        raise WorkerProblem(Outcome.UNSUPPORTED, _sanitize(str(exc))) from exc
     except (_InfrastructureProblem, ValueError) as exc:
         raise WorkerProblem(Outcome.INFRASTRUCTURE_ERROR, _sanitize(str(exc))) from exc
 
     residue = _list_containers_by_label(pinned, config, f"{OWNER_LABEL}={OWNER_VALUE}")
     if residue:
+        _quarantine_endpoint(endpoint)
         raise WorkerProblem(
             Outcome.CLEANUP_FAILED,
             "M1 worker is quarantined because prior run-owned containers remain: "
@@ -415,6 +504,20 @@ def run_docker_phase(
     authority = binding or ControllerBinding(
         run_id=uuid.uuid4(), attempt_id=uuid.uuid4(), workspace_id=uuid.uuid4()
     )
+    if _endpoint_is_quarantined(runtime.docker_endpoint):
+        return DockerPhaseResult(
+            Outcome.CLEANUP_FAILED,
+            authority,
+            None,
+            "M1 worker endpoint is quarantined after an earlier cleanup failure",
+        )
+    phase_runtime = replace(
+        runtime,
+        runner=_DeadlineDockerCliRunner(
+            runtime.runner,
+            time.monotonic() + CONTROLLED_NODE_FIXTURE_POLICY.docker.wall_time_seconds,
+        ),
+    )
     if (phase == "baseline") != (candidate is None):
         return DockerPhaseResult(
             Outcome.POLICY_BLOCKED,
@@ -423,6 +526,8 @@ def run_docker_phase(
             "baseline must use base bytes and proof must use an exact candidate",
         )
     try:
+        if candidate is not None:
+            _assert_candidate_authorized(snapshot, candidate, recipe)
         selected_files = _selected_files(snapshot, candidate)
         expected_os, expected_architecture = target.runtime.platform.split("/", 1)
         if (
@@ -433,17 +538,19 @@ def run_docker_phase(
             raise SourcePolicyError("prepared runtime is not bound to the selected target")
         _assert_recipe_authorized(recipe, phase=phase, source_files=snapshot.files)
         _assert_preexecution_contracts(selected_files, recipe, target)
+        runtime_evidence = _runtime_image_evidence(runtime, target)
     except (SourcePolicyError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
         return DockerPhaseResult(Outcome.POLICY_BLOCKED, authority, None, _sanitize(str(exc)))
 
-    materialized = None
     created: list[tuple[str, str]] = []
     app_id: str | None = None
     verifier_id: str | None = None
+    workspace_created = False
     command_evidence: list[CommandEvidence] = []
     readiness: ReadinessEvidence | None = None
     acceptance: AcceptanceProbeEvidence | None = None
     observed_digests: Mapping[str, str] | None = None
+    workspace_marker_digest: ContentDigest | None = None
     primary_outcome = Outcome.INFRASTRUCTURE_ERROR
     errors: list[str] = []
     cleanup_errors: list[str] = []
@@ -453,84 +560,89 @@ def run_docker_phase(
     owned_only = True
 
     try:
-        materialized = materialize_source(snapshot, candidate=candidate)
-        app_id = _create_app(runtime, authority)
+        app_id = _create_app(phase_runtime, authority)
         created.append((app_id, "app"))
-        _start_container(runtime, app_id)
-        _assert_container(runtime, app_id, authority, "app", "none", _IDLE_SUPERVISOR)
-        _write_workspace(runtime, materialized.files, app_id)
+        _assert_container(
+            phase_runtime,
+            app_id,
+            authority,
+            "app",
+            "none",
+            _IDLE_SUPERVISOR,
+            None,
+        )
+        _start_container(phase_runtime, app_id)
+        workspace_created = True
+        workspace_marker_digest = _seed_fresh_workspace(
+            phase_runtime, app_id, authority
+        )
+        _write_workspace(phase_runtime, selected_files, app_id)
 
         for step in recipe.steps:
-            record = _execute_foreground(runtime, app_id, step)
+            record = _execute_foreground(phase_runtime, app_id, step)
             command_evidence.append(record)
             if not record.succeeded:
                 primary_outcome = record.outcome
                 raise _StopPhase
 
-        _launch_start(runtime, app_id, recipe.start, target.app_port)
-        command_evidence.append(
-            CommandEvidence(
-                step_id=recipe.start.id,
-                kind="start",
-                argv=recipe.start.argv,
-                cwd=recipe.start.cwd,
-                timeout_seconds=recipe.start.timeout_seconds,
-                outcome=Outcome.PASSED,
-                exit_code=None,
-            )
-        )
+        _launch_start(phase_runtime, app_id, recipe.start, target.app_port)
+        start_state = _read_start_result(phase_runtime, app_id, wait_milliseconds=250)
+        command_evidence.append(_start_evidence(recipe.start, start_state))
+        if start_state.get("exists") is True:
+            primary_outcome = Outcome.FAILED
+            raise _StopPhase
 
-        verifier_id = _create_verifier(runtime, authority, app_id, target)
+        verifier_id = _create_verifier(phase_runtime, authority, app_id, target)
         created.append((verifier_id, "verifier"))
         _assert_container(
-            runtime,
+            phase_runtime,
             verifier_id,
             authority,
             "verifier",
             f"container:{app_id}",
             TRUSTED_VERIFIER_V1,
+            _verifier_argument(authority, target),
         )
-        verifier_result = _run_verifier(runtime, verifier_id, target)
+        verifier_result = _run_verifier(phase_runtime, verifier_id, target)
         readiness, acceptance, primary_outcome = _parse_verifier_result(
             verifier_result, authority, target
         )
-        observed_digests = _hash_workspace(runtime, app_id, selected_files)
+        start_state = _read_start_result(phase_runtime, app_id, wait_milliseconds=100)
+        if start_state.get("exists") is True:
+            command_evidence[-1] = _start_evidence(recipe.start, start_state)
+            if primary_outcome in {Outcome.PASSED, Outcome.FAILED}:
+                primary_outcome = Outcome.FAILED
+        observed_digests = _hash_workspace(phase_runtime, app_id, selected_files)
     except _StopPhase:
         pass
     except WorkerProblem as exc:
         primary_outcome = exc.outcome
         errors.append(_sanitize(str(exc)))
-    except BaseException as exc:
+    except Exception as exc:
         primary_outcome = Outcome.INFRASTRUCTURE_ERROR
         errors.append(_sanitize(f"unexpected trusted worker failure: {exc}"))
     finally:
-        cleanup_errors, removed = _cleanup(runtime, authority, created)
+        cleanup_errors, removed, recovered_roles = _cleanup(runtime, authority, created)
+        app_id = app_id or recovered_roles.get("app")
+        verifier_id = verifier_id or recovered_roles.get("verifier")
         app_removed = app_id is not None and app_id in removed
         verifier_removed = verifier_id is not None and verifier_id in removed
-        if materialized is not None:
-            try:
-                materialized.cleanup()
-                workspace_removed = not materialized.root.exists()
-            except OSError as exc:
-                cleanup_errors.append(_sanitize(f"workspace cleanup failed: {exc}"))
+        # The workspace is an anonymous tmpfs owned exclusively by the app
+        # container.  Exact container removal is therefore workspace removal;
+        # no repository bytes are staged in a host temporary directory.
+        workspace_removed = workspace_created and app_removed
+        cleanup_errors = _bounded_errors(cleanup_errors)
         if cleanup_errors:
+            _quarantine_endpoint(runtime.docker_endpoint)
             primary_outcome = Outcome.CLEANUP_FAILED
-
-    if not (
-        app_id
-        and verifier_id
-        and readiness is not None
-        and acceptance is not None
-        and observed_digests is not None
-        and len(command_evidence) == len(recipe.steps) + 1
-    ):
-        error = "; ".join(errors + cleanup_errors) or "phase stopped before complete evidence"
-        return DockerPhaseResult(primary_outcome, authority, None, _sanitize(error))
 
     cleanup = CleanupEvidence(
         attempted=True,
+        app_container_created=app_id is not None,
         app_container_removed=app_removed,
+        verifier_container_created=verifier_id is not None,
         verifier_container_removed=verifier_removed,
+        workspace_created=workspace_created,
         workspace_removed=workspace_removed,
         run_owned_resources_only=owned_only,
         worker_quarantined=bool(cleanup_errors),
@@ -538,6 +650,66 @@ def run_docker_phase(
     )
     if cleanup_errors:
         errors.extend(cleanup_errors)
+    errors = _bounded_errors(errors)
+    attempt = AttemptEvidence(
+        phase=phase,
+        run_id=authority.run_id,
+        attempt_id=authority.attempt_id,
+        workspace_id=authority.workspace_id,
+        base_commit=snapshot.base_commit,
+        base_git_tree=snapshot.base_tree,
+        source_git_tree=snapshot.source_tree,
+        base_tree_digest=ContentDigest(snapshot.content_tree_digest),
+        base_archive_digest=ContentDigest(snapshot.archive_digest),
+        candidate_digest=ContentDigest(candidate.patch_digest) if candidate else None,
+        candidate_tree_digest=(
+            ContentDigest(candidate.candidate_tree_digest) if candidate else None
+        ),
+        target_reference=CONTROLLED_NODE_FIXTURE_POLICY.target_path,
+        target_digest=ContentDigest.from_bytes(
+            selected_files[CONTROLLED_NODE_FIXTURE_POLICY.target_path]
+        ),
+        recipe_reference=CONTROLLED_NODE_FIXTURE_POLICY.recipe_path,
+        recipe_digest=ContentDigest.from_bytes(
+            selected_files[CONTROLLED_NODE_FIXTURE_POLICY.recipe_path]
+        ),
+        readme_reference=CONTROLLED_NODE_FIXTURE_POLICY.readme_path,
+        readme_digest=ContentDigest.from_bytes(
+            selected_files[CONTROLLED_NODE_FIXTURE_POLICY.readme_path]
+        ),
+        verifier_id=target.acceptance.verifier_id,
+        verifier_digest=TRUSTED_VERIFIER_DIGEST,
+        policy_revision=CONTROLLED_NODE_FIXTURE_POLICY.revision,
+        policy_digest=CONTROLLED_NODE_FIXTURE_POLICY_DIGEST,
+        app_runtime=runtime_evidence,
+        verifier_runtime=runtime_evidence,
+        app_container_id=app_id,
+        verifier_container_id=verifier_id,
+        workspace_marker_digest=workspace_marker_digest,
+        commands=tuple(command_evidence),
+        readiness=readiness,
+        acceptance_probe=acceptance,
+        cleanup=cleanup,
+        outcome=primary_outcome,
+        sanitized_errors=tuple(errors),
+    )
+    if not (
+        app_id
+        and verifier_id
+        and readiness is not None
+        and acceptance is not None
+        and observed_digests is not None
+        and workspace_marker_digest is not None
+        and len(command_evidence) == len(recipe.steps) + 1
+    ):
+        error = "; ".join(errors) or "phase stopped before complete evidence"
+        return DockerPhaseResult(
+            primary_outcome,
+            authority,
+            None,
+            _sanitize(error),
+            attempt,
+        )
     evidence = _build_evidence(
         runtime=runtime,
         snapshot=snapshot,
@@ -550,6 +722,7 @@ def run_docker_phase(
         verifier_id=verifier_id,
         selected_files=selected_files,
         observed_digests=observed_digests,
+        workspace_marker_digest=workspace_marker_digest,
         commands=tuple(command_evidence),
         readiness=readiness,
         acceptance=acceptance,
@@ -557,7 +730,7 @@ def run_docker_phase(
         outcome=primary_outcome,
         errors=tuple(errors),
     )
-    return DockerPhaseResult(primary_outcome, authority, evidence)
+    return DockerPhaseResult(primary_outcome, authority, evidence, attempt=attempt)
 
 
 class _StopPhase(Exception):
@@ -571,6 +744,32 @@ def _selected_files(
     if candidate:
         selected.update(candidate.replacements)
     return selected
+
+
+def _assert_candidate_authorized(
+    snapshot: SourceSnapshot,
+    candidate: CandidatePatch,
+    recipe: Recipe,
+) -> None:
+    policy = CONTROLLED_NODE_FIXTURE_POLICY
+    required_paths = {policy.recipe_path, policy.readme_path}
+    if set(candidate.replacements) != required_paths:
+        raise SourcePolicyError(
+            "M1 candidate must contain only the paired recipe and managed README update"
+        )
+    expected_readme = replace_block_bytes(
+        snapshot.content(policy.readme_path), recipe
+    )
+    if candidate.replacements[policy.readme_path] != expected_readme:
+        raise SourcePolicyError(
+            "candidate README changed bytes outside the deterministic managed block"
+        )
+    rebuilt = build_candidate_patch(snapshot, candidate.replacements)
+    if (
+        rebuilt.patch_digest != candidate.patch_digest
+        or rebuilt.candidate_tree_digest != candidate.candidate_tree_digest
+    ):
+        raise SourcePolicyError("candidate digests do not match the exact replacement bytes")
 
 
 def _assert_recipe_authorized(
@@ -681,15 +880,7 @@ def _create_verifier(
     app_id: str,
     target: Target,
 ) -> str:
-    spec = {
-        "runId": str(binding.run_id),
-        "attemptId": str(binding.attempt_id),
-        "port": target.app_port,
-        "readinessPath": target.readiness.path,
-        "readinessStatus": target.readiness.status,
-        "readinessTimeout": target.readiness.timeout_seconds,
-        "acceptanceTimeout": target.acceptance.timeout_seconds,
-    }
+    argument = _verifier_argument(binding, target)
     return _create_owned_container(
         runtime,
         binding,
@@ -700,9 +891,22 @@ def _create_verifier(
             f"/tmp:rw,noexec,nosuid,nodev,size={CONTROLLED_NODE_FIXTURE_POLICY.docker.tmp_tmpfs_bytes},uid=65534,gid=65534,mode=0700",
         ),
         program=TRUSTED_VERIFIER_V1,
-        program_argument=_encode_json(spec),
+        program_argument=argument,
         working_directory="/tmp",
     )
+
+
+def _verifier_argument(binding: ControllerBinding, target: Target) -> str:
+    spec = {
+        "runId": str(binding.run_id),
+        "attemptId": str(binding.attempt_id),
+        "port": target.app_port,
+        "readinessPath": target.readiness.path,
+        "readinessStatus": target.readiness.status,
+        "readinessTimeout": target.readiness.timeout_seconds,
+        "acceptanceTimeout": target.acceptance.timeout_seconds,
+    }
+    return _encode_json(spec)
 
 
 def _create_owned_container(
@@ -786,8 +990,10 @@ def _create_owned_container(
         return container_id
     recovered = _recover_owned(runtime, name, binding, role)
     if recovered:
-        # The caller cannot yet record this ID for cleanup, so remove it here.
-        _remove_exact(runtime, recovered, binding, role)
+        # Docker can create the container but lose/truncate the CLI response.  A
+        # recovered ID is accepted only after exact name/label checks; the caller
+        # records it immediately and performs the full pre-start inspection.
+        return recovered
     detail = _command_error(f"create {role} container", result)
     raise WorkerProblem(Outcome.INFRASTRUCTURE_ERROR, detail)
 
@@ -833,6 +1039,58 @@ def _start_container(runtime: PreparedDockerRuntime, container_id: str) -> None:
     )
     if result.returncode != 0:
         raise WorkerProblem(Outcome.INFRASTRUCTURE_ERROR, _command_error("start app", result))
+
+
+def _seed_fresh_workspace(
+    runtime: PreparedDockerRuntime,
+    app_id: str,
+    binding: ControllerBinding,
+) -> ContentDigest:
+    """Fail before repository execution if predecessor state is observable."""
+
+    marker_content = f"{binding.run_id.hex}:{binding.attempt_id.hex}:{binding.workspace_id.hex}"
+    expected_digest = ContentDigest.from_bytes(marker_content.encode("utf-8"))
+    result = runtime.runner.run(
+        (
+            runtime.config.docker_binary,
+            "container",
+            "exec",
+            "--user",
+            CONTROLLED_NODE_FIXTURE_POLICY.docker.user,
+            app_id,
+            "node",
+            "-e",
+            _SEED_FRESH_WORKSPACE,
+            _FRESHNESS_MARKER,
+            marker_content,
+        ),
+        timeout_seconds=5,
+    )
+    try:
+        value = _last_json_object(result.stdout)
+    except ValueError as exc:
+        raise WorkerProblem(
+            Outcome.INFRASTRUCTURE_ERROR,
+            "fresh workspace marker returned malformed evidence",
+        ) from exc
+    if result.returncode == 10 and value.get("preexistingAbsent") is False:
+        raise WorkerProblem(
+            Outcome.INFRASTRUCTURE_ERROR,
+            "fresh workspace contained a predecessor-state marker",
+        )
+    if (
+        result.returncode != 0
+        or value
+        != {
+            "preexistingAbsent": True,
+            "markerDigest": str(expected_digest),
+        }
+    ):
+        raise WorkerProblem(
+            Outcome.INFRASTRUCTURE_ERROR,
+            "fresh workspace marker could not be established",
+        )
+    return expected_digest
 
 
 def _write_workspace(
@@ -968,6 +1226,89 @@ def _launch_start(
         raise WorkerProblem(Outcome.INFRASTRUCTURE_ERROR, _command_error("launch app", result))
 
 
+def _read_start_result(
+    runtime: PreparedDockerRuntime,
+    app_id: str,
+    *,
+    wait_milliseconds: int,
+) -> dict[str, Any]:
+    result = runtime.runner.run(
+        (
+            runtime.config.docker_binary,
+            "container",
+            "exec",
+            "--user",
+            CONTROLLED_NODE_FIXTURE_POLICY.docker.user,
+            app_id,
+            "node",
+            "-e",
+            _READ_START_RESULT,
+            str(wait_milliseconds),
+        ),
+        timeout_seconds=3,
+    )
+    if result.returncode != 0:
+        raise WorkerProblem(
+            Outcome.INFRASTRUCTURE_ERROR,
+            _command_error("observe managed start process", result),
+        )
+    try:
+        value = _last_json_object(result.stdout)
+    except ValueError as exc:
+        raise WorkerProblem(
+            Outcome.INFRASTRUCTURE_ERROR,
+            "managed start observer returned malformed evidence",
+        ) from exc
+    if value.get("exists") is False and set(value) == {"exists"}:
+        return value
+    expected_fields = {"exists", "exitCode", "signal", "error"}
+    if value.get("exists") is not True or set(value) != expected_fields:
+        raise WorkerProblem(
+            Outcome.INFRASTRUCTURE_ERROR,
+            "managed start observer returned an invalid state",
+        )
+    exit_code = value.get("exitCode")
+    signal = value.get("signal")
+    error = value.get("error")
+    if (
+        (exit_code is not None and type(exit_code) is not int)
+        or (signal is not None and type(signal) is not str)
+        or (error is not None and type(error) is not str)
+        or (exit_code is None and signal is None and error is None)
+    ):
+        raise WorkerProblem(
+            Outcome.INFRASTRUCTURE_ERROR,
+            "managed start observer returned an invalid state",
+        )
+    return value
+
+
+def _start_evidence(step: RecipeStep, state: Mapping[str, Any]) -> CommandEvidence:
+    if state.get("exists") is not True:
+        return CommandEvidence(
+            step_id=step.id,
+            kind="start",
+            argv=step.argv,
+            cwd=step.cwd,
+            timeout_seconds=step.timeout_seconds,
+            outcome=Outcome.PASSED,
+            exit_code=None,
+        )
+    raw_exit = state.get("exitCode")
+    exit_code = raw_exit if type(raw_exit) is int else None
+    detail = state.get("error") or state.get("signal") or "managed start process exited"
+    return CommandEvidence(
+        step_id=step.id,
+        kind="start",
+        argv=step.argv,
+        cwd=step.cwd,
+        timeout_seconds=step.timeout_seconds,
+        outcome=Outcome.FAILED,
+        exit_code=exit_code,
+        sanitized_stderr_tail=_tail(str(detail)),
+    )
+
+
 def _run_verifier(
     runtime: PreparedDockerRuntime, verifier_id: str, target: Target
 ) -> CommandResult:
@@ -1055,13 +1396,24 @@ def _parse_verifier_result(
     ):
         raise WorkerProblem(Outcome.INFRASTRUCTURE_ERROR, "invalid verifier nonce digest")
     error = value.get("error")
+    required_checks = ("create_note", "read_back_same_note")
+    if outcome is Outcome.PASSED and (
+        readiness_outcome is not Outcome.PASSED
+        or tuple(raw_checks) != required_checks
+        or raw_nonce is None
+        or error not in (None, "")
+    ):
+        raise WorkerProblem(
+            Outcome.INFRASTRUCTURE_ERROR,
+            "trusted verifier claimed pass without complete acceptance observations",
+        )
     acceptance = AcceptanceProbeEvidence(
         verifier_id=target.acceptance.verifier_id,
         verifier_digest=TRUSTED_VERIFIER_DIGEST,
         timeout_seconds=target.acceptance.timeout_seconds,
         outcome=outcome,
         nonce_digest=ContentDigest(raw_nonce) if raw_nonce else None,
-        required_checks=("create_note", "read_back_same_note"),
+        required_checks=required_checks,
         passed_checks=tuple(raw_checks),
         sanitized_error=_sanitize(str(error)) if error else None,
     )
@@ -1117,6 +1469,7 @@ def _assert_container(
     role: str,
     network_mode: str,
     program: str,
+    program_argument: str | None,
 ) -> None:
     inspection = _inspect(runtime, container_id)
     config = inspection.get("Config")
@@ -1134,11 +1487,10 @@ def _assert_container(
     ):
         failures.append("runtime digest")
     command = config.get("Cmd")
-    if (
-        config.get("Entrypoint") != ["node"]
-        or not isinstance(command, list)
-        or command[:2] != ["-e", program]
-    ):
+    expected_command = ["-e", program]
+    if program_argument is not None:
+        expected_command.append(program_argument)
+    if config.get("Entrypoint") != ["node"] or command != expected_command:
         failures.append("controller-owned entrypoint")
     if config.get("User") != CONTROLLED_NODE_FIXTURE_POLICY.docker.user:
         failures.append("non-root user")
@@ -1244,26 +1596,52 @@ def _cleanup(
     runtime: PreparedDockerRuntime,
     binding: ControllerBinding,
     created: Sequence[tuple[str, str]],
-) -> tuple[list[str], set[str]]:
+) -> tuple[list[str], set[str], dict[str, str]]:
     errors: list[str] = []
     removed: set[str] = set()
+    recovered_roles: dict[str, str] = {}
     for container_id, role in reversed(created):
         try:
             _remove_exact(runtime, container_id, binding, role)
             removed.add(container_id)
-        except WorkerProblem as exc:
-            errors.append(_sanitize(str(exc)))
+        except Exception as exc:
+            errors.append(_sanitize(f"cleanup of recorded {role} failed: {exc}"))
     try:
         residue = _list_containers_by_label(
             runtime.runner,
             runtime.config,
             f"{RUN_LABEL}={binding.run_id.hex}",
         )
-        if residue:
-            errors.append("run-owned container residue remains: " + ", ".join(residue))
-    except WorkerProblem as exc:
-        errors.append(_sanitize(str(exc)))
-    return errors, removed
+        for container_id in residue:
+            try:
+                inspection = _inspect(runtime, container_id)
+                config = inspection.get("Config")
+                labels = config.get("Labels") if isinstance(config, dict) else None
+                role = labels.get(ROLE_LABEL) if isinstance(labels, dict) else None
+                if role not in {"app", "verifier"} or not _labels_match(
+                    labels, binding, role
+                ):
+                    raise WorkerProblem(
+                        Outcome.CLEANUP_FAILED,
+                        f"refused cleanup of {container_id}: ownership labels are invalid",
+                    )
+                if role in recovered_roles and recovered_roles[role] != container_id:
+                    errors.append(f"multiple run-owned {role} containers were discovered")
+                recovered_roles.setdefault(role, container_id)
+                _remove_exact(runtime, container_id, binding, role)
+                removed.add(container_id)
+            except Exception as exc:
+                errors.append(_sanitize(f"cleanup recovery failed: {exc}"))
+        remaining = _list_containers_by_label(
+            runtime.runner,
+            runtime.config,
+            f"{RUN_LABEL}={binding.run_id.hex}",
+        )
+        if remaining:
+            errors.append("run-owned container residue remains: " + ", ".join(remaining))
+    except Exception as exc:
+        errors.append(_sanitize(f"cleanup residue inspection failed: {exc}"))
+    return errors, removed, recovered_roles
 
 
 def _remove_exact(
@@ -1273,7 +1651,9 @@ def _remove_exact(
     role: str,
 ) -> None:
     inspection = _inspect(runtime, container_id)
-    if not _labels_match(inspection.get("Config", {}).get("Labels"), binding, role):
+    config = inspection.get("Config")
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    if not _labels_match(labels, binding, role):
         raise WorkerProblem(
             Outcome.CLEANUP_FAILED,
             f"refused cleanup of {container_id}: ownership labels changed",
@@ -1367,6 +1747,23 @@ def _forbidden_environment_name(entry: Any) -> bool:
     return any(fragment in name for fragment in sensitive_fragments)
 
 
+def _runtime_image_evidence(
+    runtime: PreparedDockerRuntime,
+    target: Target,
+) -> RuntimeImageEvidence:
+    try:
+        repository_digest = runtime.image.repository_digest.rsplit("@", 1)[1]
+    except IndexError as exc:
+        raise ValueError("resolved runtime reference lacks a repository digest") from exc
+    return RuntimeImageEvidence(
+        requested_reference=runtime.image.supplied_reference,
+        resolved_reference=runtime.image.repository_digest,
+        repository_digest=ContentDigest(repository_digest),
+        image_id=ContentDigest(runtime.image.image_id),
+        platform=target.runtime.platform,
+    )
+
+
 def _build_evidence(
     *,
     runtime: PreparedDockerRuntime,
@@ -1380,6 +1777,7 @@ def _build_evidence(
     verifier_id: str,
     selected_files: Mapping[str, bytes],
     observed_digests: Mapping[str, str],
+    workspace_marker_digest: ContentDigest,
     commands: tuple[CommandEvidence, ...],
     readiness: ReadinessEvidence,
     acceptance: AcceptanceProbeEvidence,
@@ -1391,14 +1789,7 @@ def _build_evidence(
     recipe_bytes = selected_files[policy.recipe_path]
     target_bytes = selected_files[policy.target_path]
     readme_bytes = selected_files[policy.readme_path]
-    repository_digest = runtime.image.repository_digest.rsplit("@", 1)[1]
-    runtime_evidence = RuntimeImageEvidence(
-        requested_reference=runtime.image.supplied_reference,
-        resolved_reference=runtime.image.repository_digest,
-        repository_digest=ContentDigest(repository_digest),
-        image_id=ContentDigest(runtime.image.image_id),
-        platform=target.runtime.platform,
-    )
+    runtime_evidence = _runtime_image_evidence(runtime, target)
     observation = ControllerObservation(
         binding=authority,
         phase=phase,
@@ -1434,6 +1825,8 @@ def _build_evidence(
         verifier_container_id=verifier_id,
         fresh_state=FreshStateEvidence(
             workspace_created_for_attempt=True,
+            preexisting_workspace_marker_absent=True,
+            workspace_marker_digest=workspace_marker_digest,
             mutable_state_reused=False,
             shared_mutable_resource_ids=(),
             only_immutable_image_layers_reused=True,
@@ -1481,6 +1874,23 @@ def _sanitize(value: str) -> str:
     for pattern, replacement in patterns:
         text = re.sub(pattern, replacement, text)
     return (text or "unspecified worker error")[:_MAX_CONTROLLER_ERROR]
+
+
+def _bounded_errors(values: Sequence[str]) -> list[str]:
+    sanitized = [_sanitize(value) for value in values[:31]]
+    if len(values) > 31:
+        sanitized.append("additional bounded errors were omitted")
+    return sanitized
+
+
+def _endpoint_is_quarantined(endpoint: str) -> bool:
+    with _QUARANTINE_LOCK:
+        return endpoint in _QUARANTINED_ENDPOINTS
+
+
+def _quarantine_endpoint(endpoint: str) -> None:
+    with _QUARANTINE_LOCK:
+        _QUARANTINED_ENDPOINTS.add(endpoint)
 
 
 def _tail(value: str) -> str:

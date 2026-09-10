@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import subprocess
 import unittest
 from collections.abc import Sequence
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from firstrun.domain.outcomes import Outcome
 from firstrun.preflight.docker import (
@@ -532,14 +533,13 @@ console.log(JSON.stringify(results));
         self.assertEqual(2, len(pulls))
         self.assertTrue(all("linux/amd64" in call for call in pulls))
 
-    @patch("firstrun.preflight.docker.subprocess.run")
-    def test_subprocess_runner_is_non_interactive_and_bounds_output(self, run) -> None:
-        run.return_value = subprocess.CompletedProcess(
-            args=["docker", "version"],
-            returncode=7,
-            stdout="x" * 500,
-            stderr="y" * 500,
-        )
+    @patch("firstrun.preflight.docker.subprocess.Popen")
+    def test_subprocess_runner_is_non_interactive(self, popen) -> None:
+        process = Mock(pid=1234)
+        process.stdout = io.BytesIO(b"x" * 80)
+        process.stderr = io.BytesIO(b"y" * 80)
+        process.wait.return_value = 7
+        popen.return_value = process
 
         trusted_docker = r"C:\Trusted\docker.exe"
         with patch(
@@ -552,20 +552,41 @@ console.log(JSON.stringify(results));
         self.assertEqual(7, result.returncode)
         self.assertLessEqual(len(result.stdout), 128)
         self.assertLessEqual(len(result.stderr), 128)
-        self.assertTrue(result.stdout.endswith("...[truncated]"))
         trusted_path = Path(trusted_docker).resolve()
-        run.assert_called_once_with(
+        popen.assert_called_once_with(
             [str(trusted_path), "version"],
             cwd=str(trusted_path.parent),
             stdin=subprocess.DEVNULL,
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             shell=False,
-            timeout=3,
+            creationflags=(
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            ),
         )
+        process.wait.assert_called_once_with(timeout=3)
+
+    @patch("firstrun.preflight.docker.subprocess.Popen")
+    def test_subprocess_runner_kills_on_hard_output_limit(self, popen) -> None:
+        process = Mock(pid=1234)
+        process.stdout = io.BytesIO(b"x" * 129)
+        process.stderr = io.BytesIO()
+        process.wait.return_value = 0
+        popen.return_value = process
+
+        with patch(
+            "firstrun.preflight.docker.shutil.which",
+            return_value=r"C:\Trusted\docker.exe",
+        ):
+            result = SubprocessDockerCliRunner(max_output_chars=128).run(
+                ("docker", "version"), timeout_seconds=3
+            )
+
+        self.assertEqual(125, result.returncode)
+        self.assertEqual(128, len(result.stdout))
+        self.assertIn("hard byte limit", result.stderr)
+        process.kill.assert_called()
 
     @patch("firstrun.preflight.docker.subprocess.run")
     def test_subprocess_runner_refuses_a_repo_local_docker_binary(self, run) -> None:

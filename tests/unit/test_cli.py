@@ -4,7 +4,7 @@ import io
 import json
 import unittest
 from contextlib import redirect_stdout
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from firstrun.cli import run
 from firstrun.domain import Outcome
@@ -48,6 +48,37 @@ class CliTests(unittest.TestCase):
             str(selected_target).replace("\\", "/"),
             "fixtures/notes-app/.firstrun/target.json",
         )
+
+    @patch("firstrun.cli.verify_local")
+    def test_human_verify_output_surfaces_partial_attempt_cleanup(self, verify) -> None:
+        attempt = Mock(
+            attempt_id="22222222-2222-4222-8222-222222222222",
+            outcome=Outcome.INFRASTRUCTURE_ERROR,
+            cleanup=Mock(succeeded=True),
+        )
+        verify.return_value = LocalVerificationResult(
+            outcome=Outcome.INFRASTRUCTURE_ERROR,
+            source_revision="a" * 40,
+            baseline=None,
+            baseline_attempt=attempt,
+            message="setup adapter failed",
+        )
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            code = run(
+                (
+                    "verify-local",
+                    "--repo",
+                    "fixtures/notes-app",
+                    "--target",
+                    "fixtures/notes-app/.firstrun/target.json",
+                )
+            )
+
+        self.assertEqual(code, 12)
+        self.assertIn("attempt ID: 22222222-2222-4222-8222-222222222222", output.getvalue())
+        self.assertIn("cleanup: passed", output.getvalue())
 
     @patch("firstrun.cli.run_doctor")
     def test_doctor_json_returns_authoritative_exit_code(self, doctor) -> None:
