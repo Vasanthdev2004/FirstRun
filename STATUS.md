@@ -7,11 +7,11 @@
 | Capability | State | Evidence |
 |---|---|---|
 | v2 specification and controlled fixture | Authored and pack-checked | `VALIDATION_REPORT.md`; `tools/check_pack.py` passed 24 handoff-only checks |
-| Python foundation and outcome contract | Implemented | Python 3.12.13; stable exits 0/10/11/12/13/14/15; commits `20b801b`, `4625f82` |
+| Python foundation and outcome contract | Implemented | Python 3.12.13; stable exits 0/10/11/12/13/14/15; commits `bddc022`, `6fbea08` |
 | Read-only environment doctor | Implemented and unit-tested | `python -m firstrun doctor --json`; actual result below |
 | Backend dependency lock | Implemented | uv 0.12.9; Hatchling 1.32.0; Pydantic 2.13.5; Strands Agents 1.55.1; boto3/botocore 1.43.91 |
 | Docker client and selected context | Available | Docker client 29.7.2; context `desktop-linux`; local endpoint `npipe:////./pipe/dockerDesktopLinuxEngine` |
-| Docker server on this machine | Blocked | Server connection failed at 2026-09-10T12:41:42+05:30; engine type remains unknown |
+| Docker server on this machine | Blocked | Docker Desktop 4.88.1 crashed during startup at 2026-09-10T13:03:10+05:30; engine type remains unknown |
 | Guarded Docker M0 preflight | Implemented and unit-tested; not live-run | Controller-owned digest-pinned containers, loopback-only verifier, hard limits, ownership-checked cleanup; 16 focused tests |
 | Guarded Strands/Bedrock M0 preflight | Implemented and unit-tested; provider/account unknown | Killable isolated child, exact dependency-origin checks, canonical endpoint reconciliation, test/live provenance, explicit spend and identity prerequisites |
 | Real Strands tool call | Not run | No named profile/region/model and no cost authorization were supplied; no provider call or credential read was made |
@@ -23,10 +23,13 @@
 
 ## Current blockers
 
-1. Docker Desktop's Linux daemon is unavailable. Reproduction:
-   `docker version --format "{{json .Server}}"` exits 1 with
-   `open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.`
-   No container was launched and no runtime image digest has been captured.
+1. Docker Desktop's Linux daemon is unavailable. `docker desktop start --detach`
+   reports that startup began, but the backend then crashes while removing the exact
+   runtime socket `C:\Users\vasan\AppData\Local\Docker\run\sailor-ingest.sock`:
+   `The file cannot be accessed by the system.` The follow-up
+   `docker version --format "{{json .Server}}"` exits 1 because
+   `//./pipe/dockerDesktopLinuxEngine` does not exist. No container was launched,
+   no image was pulled, and no runtime image digest has been captured.
 2. Live provider proof requires a user-selected named AWS profile, exact region and
    model ID, explicit cost acknowledgement, and confirmation that the current
    identity was independently verified as temporary and non-root. These facts are
@@ -38,7 +41,7 @@ satisfy those gates.
 
 ## Latest checkpoint
 
-- Commit: `f6aae83` (`feat: add guarded M0 preflights`)
+- Implementation commit: `4c56690` (`feat: add guarded M0 preflights`)
 - Commands and exit codes:
   - `uv lock --check` — 0; 51 packages resolved.
   - `uv run --frozen --extra provider --python 3.12.13 python -m unittest discover -s tests -v` — 0; 51 tests passed.
@@ -48,6 +51,8 @@ satisfy those gates.
   - `docker context show` — 0; `desktop-linux`.
   - `docker context inspect --format "{{json .Endpoints.docker.Host}}" desktop-linux` — 0; local named pipe above.
   - `docker version --format "{{json .Server}}"` — 1; server unavailable.
+  - `docker desktop start --detach` — 0 for the start request; the backend then
+    crashed on the exact runtime socket above and the engine remained unavailable.
 - Accepted behavior: permission gates stop Docker/provider side effects by default;
   fake provider evidence is marked non-live and cannot be milestone-eligible;
   ambiguous Docker creates are recovered by deterministic name and verified labels
@@ -55,6 +60,6 @@ satisfy those gates.
 - Security review: no remaining P0/P1 findings in the implemented M0 boundaries.
 - Known limitations: no live Docker topology, cleanup, or image digest has been
   observed; no AWS identity/model/usage has been observed; M1 is intentionally absent.
-- Next single task: start Docker Desktop, re-run the doctor, then—with explicit
-  container-change and image-pull approval—run the live Docker preflight and record
-  its resolved digest and cleanup evidence.
+- Next single task: recover Docker Desktop from the exact stale/locked runtime-socket
+  failure, re-run the doctor, then run the live Docker preflight and record its
+  resolved digest and cleanup evidence.
