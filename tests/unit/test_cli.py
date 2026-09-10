@@ -10,9 +10,45 @@ from firstrun.cli import run
 from firstrun.domain import Outcome
 from firstrun.preflight.docker import DockerPreflightResult, ResolvedImage
 from firstrun.preflight.strands import StrandsPreflightResult
+from firstrun.verification.local import LocalVerificationResult
 
 
 class CliTests(unittest.TestCase):
+    @patch("firstrun.cli.verify_local")
+    def test_verify_local_uses_required_paths_and_stable_outcome_code(
+        self, verify
+    ) -> None:
+        verify.return_value = LocalVerificationResult(
+            outcome=Outcome.FAILED,
+            source_revision="a" * 40,
+            baseline=None,
+            message="functional probe failed",
+        )
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            code = run(
+                (
+                    "verify-local",
+                    "--repo",
+                    "fixtures/notes-app",
+                    "--target",
+                    "fixtures/notes-app/.firstrun/target.json",
+                    "--json",
+                )
+            )
+
+        self.assertEqual(code, 10)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["outcome"], "failed")
+        self.assertEqual(payload["exit_code"], 10)
+        selected_repo, selected_target = verify.call_args.args
+        self.assertEqual(str(selected_repo).replace("\\", "/"), "fixtures/notes-app")
+        self.assertEqual(
+            str(selected_target).replace("\\", "/"),
+            "fixtures/notes-app/.firstrun/target.json",
+        )
+
     @patch("firstrun.cli.run_doctor")
     def test_doctor_json_returns_authoritative_exit_code(self, doctor) -> None:
         doctor.return_value = {

@@ -12,6 +12,7 @@ from firstrun.doctor import run_doctor
 from firstrun.domain import Outcome, exit_code_for
 from firstrun.preflight.docker import DockerPreflightConfig, run_docker_preflight
 from firstrun.preflight.strands import StrandsPreflightConfig, run_strands_preflight
+from firstrun.verification.local import verify_local
 
 
 M0_RUNTIME_IMAGE = "node:22-bookworm-slim"
@@ -83,6 +84,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit the complete machine-readable preflight result",
+    )
+
+    verify = subcommands.add_parser(
+        "verify-local",
+        help="verify the one controller-approved M1 fixture in isolated Docker",
+    )
+    verify.add_argument(
+        "--repo",
+        type=Path,
+        required=True,
+        help="exact path of the controller-approved fixture repository",
+    )
+    verify.add_argument(
+        "--target",
+        type=Path,
+        required=True,
+        help="exact <repo>/.firstrun/target.json path",
+    )
+    verify.add_argument(
+        "--json",
+        action="store_true",
+        help="emit complete typed run evidence",
     )
     return parser
 
@@ -164,6 +187,28 @@ def run(argv: Sequence[str] | None = None) -> int:
             print(f"- provider: {result.provider}")
             print(f"- model: {result.model_id} ({result.region})")
             print(f"- result: {result.message}")
+        return exit_code_for(result.outcome)
+
+    if args.command == "verify-local":
+        result = verify_local(args.repo, args.target)
+        if args.json:
+            payload = result.to_dict()
+            payload["exit_code"] = exit_code_for(result.outcome)
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(f"FirstRun local verification: {result.outcome.value}")
+            if result.source_revision:
+                print(f"- source revision: {result.source_revision}")
+            if result.baseline is not None:
+                print(f"- run ID: {result.baseline.run_id}")
+                print(f"- readiness: {result.baseline.readiness.outcome.value}")
+                print(
+                    "- functional acceptance: "
+                    f"{result.baseline.acceptance_probe.outcome.value}"
+                )
+                print(f"- cleanup: {'passed' if result.baseline.cleanup.succeeded else 'failed'}")
+            if result.message:
+                print(f"- result: {result.message}")
         return exit_code_for(result.outcome)
 
     raise AssertionError(f"unhandled command: {args.command}")  # pragma: no cover
