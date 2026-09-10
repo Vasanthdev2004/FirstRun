@@ -52,6 +52,9 @@ def healthy_responses(repo: Path) -> dict[tuple[str, ...], CommandResult]:
         ("git", "--version"): "git version 2.54.0",
         (
             "git",
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
             "-C",
             resolved_repo,
             "rev-parse",
@@ -59,6 +62,9 @@ def healthy_responses(repo: Path) -> dict[tuple[str, ...], CommandResult]:
         ): "true\n",
         (
             "git",
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
             "-C",
             resolved_repo,
             "status",
@@ -106,6 +112,16 @@ class DoctorTests(unittest.TestCase):
         self.assertNotIn("aws", [call[0][0] for call in runner.calls])
         self.assertNotIn("strands", [call[0][0] for call in runner.calls])
         json.dumps(result)
+
+    @patch("firstrun.doctor.SubprocessRunner")
+    def test_default_runner_rejects_tools_from_cwd_and_selected_repo(self, factory) -> None:
+        factory.return_value = FakeRunner(healthy_responses(self.repo))
+
+        result = run_doctor(self.repo, python_version=(3, 12, 13))
+
+        self.assertEqual("passed", result["outcome"])
+        roots = factory.call_args.kwargs["forbidden_roots"]
+        self.assertEqual((Path.cwd().resolve(), self.repo.resolve()), roots)
 
     def test_python_outside_312_is_unsupported(self) -> None:
         runner = FakeRunner(healthy_responses(self.repo))
@@ -181,6 +197,9 @@ class DoctorTests(unittest.TestCase):
         responses = healthy_responses(self.repo)
         status_argv = (
             "git",
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
             "-C",
             str(self.repo.resolve()),
             "status",
@@ -221,9 +240,15 @@ class DoctorTests(unittest.TestCase):
         self.assertLessEqual(len(result.stdout), 64)
         self.assertTrue(result.stdout.endswith("...[truncated]"))
         called_args, called_kwargs = run.call_args
-        self.assertEqual(called_args[0], ("C:/tools/tool.exe", "--version"))
+        self.assertEqual(
+            called_args[0],
+            (str(Path("C:/tools/tool.exe").resolve()), "--version"),
+        )
         self.assertIs(called_kwargs["shell"], False)
         self.assertEqual(called_kwargs["timeout"], 2.5)
+        self.assertEqual(
+            called_kwargs["cwd"], str(Path("C:/tools/tool.exe").resolve().parent)
+        )
         which.assert_called_once_with("tool")
 
     @patch("firstrun.doctor.subprocess.run")
@@ -233,11 +258,27 @@ class DoctorTests(unittest.TestCase):
         )
         runner = SubprocessRunner(max_output_chars=64)
 
-        result = runner.run(("slow-tool",), timeout_seconds=1)
+        with patch(
+            "firstrun.doctor.shutil.which", return_value="C:/tools/slow-tool.exe"
+        ):
+            result = runner.run(("slow-tool",), timeout_seconds=1)
 
         self.assertTrue(result.timed_out)
         self.assertIsNone(result.returncode)
         self.assertLessEqual(len(result.stdout), 64)
+
+    @patch("firstrun.doctor.subprocess.run")
+    def test_subprocess_runner_refuses_repo_local_executable(self, run) -> None:
+        repo = Path("test-repository").resolve()
+        local_tool = repo / "docker.exe"
+        runner = SubprocessRunner(forbidden_roots=(repo,))
+
+        with patch("firstrun.doctor.shutil.which", return_value=str(local_tool)):
+            result = runner.run(("docker", "--version"), timeout_seconds=1)
+
+        self.assertIsNone(result.returncode)
+        self.assertIn("untrusted root", result.error or "")
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

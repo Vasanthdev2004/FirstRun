@@ -56,10 +56,17 @@ class CommandRunner(Protocol):
 class SubprocessRunner:
     """Run explicit argv without a shell and retain only bounded output."""
 
-    def __init__(self, *, max_output_chars: int = 4096) -> None:
+    def __init__(
+        self,
+        *,
+        max_output_chars: int = 4096,
+        forbidden_roots: Sequence[str | Path] | None = None,
+    ) -> None:
         if max_output_chars < 32:
             raise ValueError("max_output_chars must be at least 32")
         self._max_output_chars = max_output_chars
+        roots = forbidden_roots if forbidden_roots is not None else (Path.cwd(),)
+        self._forbidden_roots = tuple(Path(root).resolve() for root in roots)
 
     def run(
         self, argv: Sequence[str], *, timeout_seconds: float
@@ -73,14 +80,28 @@ class SubprocessRunner:
 
         explicit_argv = tuple(argv)
         resolved_program = shutil.which(explicit_argv[0])
-        execution_argv = (
-            (resolved_program, *explicit_argv[1:])
-            if resolved_program is not None
-            else explicit_argv
-        )
+        if resolved_program is None:
+            return CommandResult(
+                argv=explicit_argv,
+                returncode=None,
+                stdout="",
+                stderr="",
+                error=f"trusted executable not found: {explicit_argv[0]}",
+            )
+        program_path = Path(resolved_program).resolve()
+        if any(_is_within(program_path, root) for root in self._forbidden_roots):
+            return CommandResult(
+                argv=explicit_argv,
+                returncode=None,
+                stdout="",
+                stderr="",
+                error=f"refused executable beneath an untrusted root: {program_path}",
+            )
+        execution_argv = (str(program_path), *explicit_argv[1:])
         try:
             completed = subprocess.run(
                 execution_argv,
+                cwd=str(program_path.parent),
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
@@ -134,8 +155,10 @@ def run_doctor(
 ) -> DoctorResult:
     """Inspect local M0 prerequisites without changing local or remote state."""
 
-    command_runner = runner or SubprocessRunner()
     resolved_repo = Path(repo_path).resolve()
+    command_runner = runner or SubprocessRunner(
+        forbidden_roots=(Path.cwd().resolve(), resolved_repo)
+    )
     current_python = python_version or (
         sys.version_info.major,
         sys.version_info.minor,
@@ -332,7 +355,16 @@ def _record_git_repository(
     repo_path: Path,
 ) -> None:
     inside_result = runner.run(
-        ("git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"),
+        (
+            "git",
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
+            "-C",
+            str(repo_path),
+            "rev-parse",
+            "--is-inside-work-tree",
+        ),
         timeout_seconds=_COMMAND_TIMEOUT_SECONDS,
     )
     if not _command_succeeded(inside_result) or (
@@ -347,6 +379,9 @@ def _record_git_repository(
     status_result = runner.run(
         (
             "git",
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
             "-C",
             str(repo_path),
             "status",
@@ -530,3 +565,11 @@ def _single_line(value: str) -> str:
     if len(compact) <= _SUMMARY_LIMIT:
         return compact
     return compact[: _SUMMARY_LIMIT - 3] + "..."
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True

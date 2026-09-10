@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.27,<2"]
+requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -7,7 +7,13 @@ name = "firstrun"
 version = "0.1.0"
 description = "Trustworthy local setup verification engine for FirstRun"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = ["pydantic==2.13.5"]
+
+[project.optional-dependencies]
+provider = [
+  "boto3==1.43.91",
+  "strands-agents==1.55.1",
+]
 
 [project.scripts]
 firstrun = "firstrun.cli:main"
@@ -17,3 +23,4 @@ packages = ["backend/firstrun"]
 
 [tool.uv]
 default-groups = []
+required-version = "==0.12.9"
