@@ -62,10 +62,6 @@ the exact clean revision reported in the handoff. A skipped live test is not a p
 3. M1 source materialization uses a single bounded Docker CLI argument. The current
    committed fixture is safely below Windows' argument limit; widening the source
    policy requires a trusted chunked/streaming transport first.
-4. Cleanup is bounded per Docker operation but does not yet have one aggregate
-   cleanup deadline. Any cleanup error quarantines the endpoint; aggregate deadline
-   hardening remains required before widening beyond the controlled local lane.
-
 ## Next single task
 
 After the exact-revision M1 gate passes, begin M2 only: integrate the narrow Strands

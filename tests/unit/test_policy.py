@@ -49,7 +49,7 @@ class ControlledNodeFixturePolicyTests(unittest.TestCase):
     def test_canonical_policy_digest_is_stable(self) -> None:
         self.assertEqual(
             str(CONTROLLED_NODE_FIXTURE_POLICY_DIGEST),
-            "sha256:75d96f29b3f11efabdeb7fc2781662af36327b190c13601900b2bfcd9b195c53",
+            "sha256:591db47bcda70bb133659551535a64bc136b5303f2af2aed60315ab082dbefbd",
         )
         self.assertEqual(
             digest_policy(CONTROLLED_NODE_FIXTURE_POLICY),

@@ -387,21 +387,32 @@ class _DeadlineDockerCliRunner:
         deadline: float,
         *,
         clock: Any = time.monotonic,
+        budget_name: Literal["phase", "cleanup"] = "phase",
     ) -> None:
         self._delegate = delegate
         self._deadline = deadline
         self._clock = clock
+        self._budget_name = budget_name
 
     def run(self, argv: Sequence[str], *, timeout_seconds: float) -> CommandResult:
         remaining = self._deadline - float(self._clock())
         if remaining <= 0:
-            raise WorkerProblem(Outcome.TIMED_OUT, "M1 phase wall-time budget expired")
+            raise WorkerProblem(
+                Outcome.TIMED_OUT,
+                f"M1 {self._budget_name} wall-time budget expired",
+            )
         effective_timeout = min(float(timeout_seconds), remaining)
         result = self._delegate.run(argv, timeout_seconds=effective_timeout)
         if float(self._clock()) > self._deadline:
-            raise WorkerProblem(Outcome.TIMED_OUT, "M1 phase wall-time budget expired")
+            raise WorkerProblem(
+                Outcome.TIMED_OUT,
+                f"M1 {self._budget_name} wall-time budget expired",
+            )
         if result.returncode == 124 and effective_timeout < float(timeout_seconds):
-            raise WorkerProblem(Outcome.TIMED_OUT, "M1 phase wall-time budget expired")
+            raise WorkerProblem(
+                Outcome.TIMED_OUT,
+                f"M1 {self._budget_name} wall-time budget expired",
+            )
         return result
 
 
@@ -622,7 +633,18 @@ def run_docker_phase(
         primary_outcome = Outcome.INFRASTRUCTURE_ERROR
         errors.append(_sanitize(f"unexpected trusted worker failure: {exc}"))
     finally:
-        cleanup_errors, removed, recovered_roles = _cleanup(runtime, authority, created)
+        cleanup_runtime = replace(
+            runtime,
+            runner=_DeadlineDockerCliRunner(
+                runtime.runner,
+                time.monotonic()
+                + CONTROLLED_NODE_FIXTURE_POLICY.docker.cleanup_wall_time_seconds,
+                budget_name="cleanup",
+            ),
+        )
+        cleanup_errors, removed, recovered_roles = _cleanup(
+            cleanup_runtime, authority, created
+        )
         app_id = app_id or recovered_roles.get("app")
         verifier_id = verifier_id or recovered_roles.get("verifier")
         app_removed = app_id is not None and app_id in removed

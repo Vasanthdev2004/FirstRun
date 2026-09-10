@@ -64,6 +64,7 @@ class DockerLimits(_FrozenPolicy):
     max_output_bytes: Literal[262_144] = 262_144
     max_log_bytes: Literal[1_048_576] = 1_048_576
     wall_time_seconds: Literal[120] = 120
+    cleanup_wall_time_seconds: Literal[30] = 30
     stop_timeout_seconds: Literal[2] = 2
     network_mode: Literal["none"] = "none"
     cap_drop: Literal["ALL"] = "ALL"

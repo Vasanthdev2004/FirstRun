@@ -496,7 +496,7 @@ class M1WorkerPolicyTests(unittest.TestCase):
             patch(
                 "firstrun.worker.docker._cleanup",
                 return_value=(["forced cleanup failure"], set(), {}),
-            ),
+            ) as cleanup,
             patch("firstrun.worker.docker._quarantine_endpoint") as quarantine,
         ):
             result = run_docker_phase(
@@ -514,6 +514,9 @@ class M1WorkerPolicyTests(unittest.TestCase):
         self.assertTrue(result.attempt.cleanup.worker_quarantined)
         self.assertIn("forced cleanup failure", result.attempt.cleanup.sanitized_errors)
         quarantine.assert_called_once_with(selected_runtime.docker_endpoint)
+        cleanup_runtime = cleanup.call_args.args[0]
+        self.assertIsInstance(cleanup_runtime.runner, _DeadlineDockerCliRunner)
+        self.assertEqual("cleanup", cleanup_runtime.runner._budget_name)
 
     def test_cleanup_handles_malformed_inspection_without_escaping(self) -> None:
         app_id = "a" * 64
