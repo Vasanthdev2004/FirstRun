@@ -11,8 +11,8 @@ from firstrun.domain.contracts import load_recipe, load_target
 from firstrun.domain.evidence import ControllerBinding
 from firstrun.domain.outcomes import Outcome
 from firstrun.verification.local import verify_known_oracle, verify_local
-from firstrun.verification.source import capture_approved_source
-from firstrun.worker.docker import DockerPhaseResult
+from firstrun.verification.source import SourcePolicyError, capture_approved_source
+from firstrun.worker.docker import DockerPhaseResult, WorkerProblem
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -115,6 +115,48 @@ class LocalVerificationPolicyTests(unittest.TestCase):
 
         self.assertIs(result.outcome, Outcome.INFRASTRUCTURE_ERROR)
         self.assertIs(result.proof, proof_evidence)
+
+    def test_oracle_classifies_an_unavailable_runtime_instead_of_raising(self) -> None:
+        problem = WorkerProblem(
+            Outcome.INFRASTRUCTURE_ERROR, "Docker server is unreachable"
+        )
+        with (
+            patch(
+                "firstrun.verification.local._prepare_inputs",
+                return_value=(self.snapshot, self.target, self.recipe),
+            ),
+            patch(
+                "firstrun.verification.local.prepare_docker_runtime",
+                side_effect=problem,
+            ),
+            patch("firstrun.verification.local.run_docker_phase") as phase,
+        ):
+            result = verify_known_oracle(FIXTURE, TARGET)
+
+        self.assertIs(result.outcome, Outcome.INFRASTRUCTURE_ERROR)
+        self.assertIn("Docker server is unreachable", result.message or "")
+        self.assertEqual(self.snapshot.base_commit, result.source_revision)
+        phase.assert_not_called()
+
+    def test_oracle_classifies_a_controller_asset_policy_failure(self) -> None:
+        with (
+            patch(
+                "firstrun.verification.local._prepare_inputs",
+                return_value=(self.snapshot, self.target, self.recipe),
+            ),
+            patch(
+                "firstrun.verification.local.read_committed_controller_file",
+                side_effect=SourcePolicyError("controller asset exceeds its byte limit"),
+            ),
+            patch("firstrun.verification.local.prepare_docker_runtime") as docker,
+            patch("firstrun.verification.local.run_docker_phase") as phase,
+        ):
+            result = verify_known_oracle(FIXTURE, TARGET)
+
+        self.assertIs(result.outcome, Outcome.POLICY_BLOCKED)
+        self.assertIn("byte limit", result.message or "")
+        docker.assert_not_called()
+        phase.assert_not_called()
 
 
 if __name__ == "__main__":

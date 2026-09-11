@@ -483,7 +483,13 @@ class StrandsPreflightTests(unittest.TestCase):
             missing_identity = run_strands_preflight(
                 config(provider_cost_acknowledged=True)
             )
-            missing_isolation = run_strands_preflight(live_config())
+            # Pin the interpreter flag so this asserts the not-isolated branch
+            # whether or not the test runner itself was started with -I.
+            with patch(
+                "firstrun.preflight.strands.sys.flags",
+                SimpleNamespace(isolated=0),
+            ):
+                missing_isolation = run_strands_preflight(live_config())
 
         self.assertEqual(Outcome.POLICY_BLOCKED, missing_cost.outcome)
         self.assertEqual("provider_cost_not_acknowledged", missing_cost.error_code)

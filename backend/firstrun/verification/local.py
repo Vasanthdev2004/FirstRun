@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from firstrun.domain.contracts import Recipe, Target
+from firstrun.domain.contracts import ContractFileError, Recipe, Target
 from firstrun.domain.evidence import AttemptEvidence, ContentDigest, RunEvidence
 from firstrun.domain.outcomes import Outcome
 from firstrun.verification.policy import (
