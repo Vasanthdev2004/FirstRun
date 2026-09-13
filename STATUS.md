@@ -1,8 +1,8 @@
 # Implementation status — observed evidence only
 
-**Last authored:** 2026-09-10.  
-**Current checkpoint:** M4 local web implementation is present at the owner's
-request to continue development. M2 acceptance/live provider validation, the real
+**Last authored:** 2026-09-13.
+**Current checkpoint:** the M4 implementation review is complete; it found and fixed
+two defects (`020f88c`). M2 acceptance/live provider validation, the real
 installed-App M3 workflow and live-configured M4 acceptance remain outstanding.
 Full Docker/provider/App tests are deferred, not passed.
 **Product target:** web app + GitHub App; Next.js now fronts the existing trusted
@@ -221,10 +221,57 @@ No fixture scripts ran on the host; no containers, provider calls, real OAuth
 exchange, runtime App writes, cloud provisioning or deployment occurred. Local
 UI preview is development evidence, not proof of the complete FirstRun workflow.
 
+## M4 review fix evidence
+
+Commit `020f88c`. This slice is a defect review of the existing M4 checkpoint, not
+new milestone scope. No production behavior changed beyond making one exception
+handler resolvable, and no acceptance expectation was altered or weakened.
+
+- `verification/local.py` listed `ContractFileError` in the first `except` clause of
+  `verify_known_oracle` without importing it. Python evaluates that clause's tuple
+  whenever any exception propagates out of the enclosing `try`, so every failure
+  inside the M1 known-oracle harness raised `NameError` instead of returning a typed
+  result. An unreachable Docker server produced a crash rather than
+  `infrastructure_error`; a controller-asset policy failure produced a crash rather
+  than `policy_blocked`. The name is now imported from `firstrun.domain.contracts`.
+- Two regression tests were added to `tests/unit/test_local_verification.py` for the
+  `WorkerProblem` and `SourcePolicyError` handler paths. With the import removed both
+  fail with the original `NameError`, so the coverage is bound to the actual defect
+  rather than to the corrected code.
+- `tests/unit/test_strands_preflight.py` asserted the not-isolated live-preflight
+  branch while reading the ambient interpreter flag. It therefore passed under plain
+  `python` and failed under `python -I`, the mode used for the recorded M3 and M4 test
+  runs, so the full suite had never been green in both modes at once. It now patches
+  `firstrun.preflight.strands.sys.flags` with the `SimpleNamespace` idiom already used
+  three times elsewhere in that file.
+- The stale `Checkpoint commits` list above was left unchanged. It records M1 commits
+  only; the M2, M3 and M4 checkpoint commits were never added to it. That gap is
+  recorded here rather than silently repaired.
+
+### Commands observed for this slice
+
+- `.venv\Scripts\python.exe -I -m unittest discover -s tests -p 'test_*.py'`: exit 0,
+  187 tests, 6 skipped (the live Docker integration tests; `FIRSTRUN_RUN_LIVE_M1` was
+  unset). The same command reported one failure before this change.
+- `.venv\Scripts\python.exe -m unittest discover -s tests -p 'test_*.py'`: exit 0,
+  187 tests, 6 skipped. The suite now passes in both interpreter modes.
+- `.venv\Scripts\python.exe -I -m compileall -q backend/firstrun`: exit 0.
+- `.venv\Scripts\python.exe tools/check_pack.py`: exit 0, 24 handoff-asset checks.
+- `git diff --check`: exit 0.
+
+No containers were launched, no provider or AWS requests were made, no OAuth exchange
+occurred, and no runtime GitHub App writes occurred during this slice. `020f88c` is
+committed locally and has not been pushed to `origin`.
+
 ## Next single task
 
-Review the M4 implementation checkpoint. Live activation still requires the
-owner-approved demo repository, App/OAuth configuration and provider authority.
-M5 deployment needs an explicit hosting/security/spend choice before provisioning.
-Do not describe M2/M3/M4 as accepted until their outstanding real acceptance checks
-and the noted M4 gaps are addressed. M5/M6 have not been scaffolded.
+Unblock the provider. A03 — the Strands agent discovering the repair from tool
+evidence with no answer key — has still never executed, and it is the product's
+central claim. It requires the owner-selected AWS profile, exact region and model,
+explicit cost acknowledgement, and confirmation of independently verified temporary
+non-root credentials. Live M3 separately requires the owner-approved demo repository,
+least-privilege App/OAuth configuration and an operator-managed HTTPS webhook
+endpoint. M5 deployment needs an explicit hosting/security/spend choice before
+provisioning. Do not describe M2/M3/M4 as accepted until their outstanding real
+acceptance checks and the noted M4 cancellation gap are addressed. M5/M6 have not
+been scaffolded.
