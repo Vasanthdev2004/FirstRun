@@ -38,6 +38,7 @@ _LOCKED_DISTRIBUTIONS = {
     "pydantic": ("pydantic", "2.13.5"),
     "anthropic": ("anthropic", "1.5.0"),
     "google.genai": ("google-genai", "2.23.0"),
+    "openai": ("openai", "3.13.0"),
 }
 
 _MAX_WALL_TIME_SECONDS = 120.0
@@ -191,6 +192,8 @@ class _StrandsDependencies:
     mantle_client_type: Any
     gemini_model_type: Any
     genai_client_type: Any
+    openai_model_type: Any
+    openai_client_type: Any
     boto_session_type: Any
     boto_config_type: Any
     base_model_type: Any
@@ -886,6 +889,7 @@ def _load_strands_dependencies() -> _StrandsDependencies:
         import anthropic
         import boto3
         import botocore
+        import openai
         import pydantic
         import strands
         from botocore.config import Config as BotoConfig
@@ -896,6 +900,7 @@ def _load_strands_dependencies() -> _StrandsDependencies:
         from google import genai
         from strands.models.anthropic import AnthropicModel
         from strands.models.gemini import GeminiModel
+        from strands.models.openai import OpenAIModel
         from strands.types.exceptions import StructuredOutputException
     except ImportError as exc:
         raise _StrandsUnavailable("strands_dependency_missing", sdk_version) from exc
@@ -907,6 +912,7 @@ def _load_strands_dependencies() -> _StrandsDependencies:
         ("pydantic", pydantic),
         ("anthropic", anthropic),
         ("google.genai", genai),
+        ("openai", openai),
     ):
         module_file = getattr(imported_module, "__file__", None)
         if (
@@ -922,6 +928,8 @@ def _load_strands_dependencies() -> _StrandsDependencies:
         mantle_client_type=AsyncAnthropicBedrockMantle,
         gemini_model_type=GeminiModel,
         genai_client_type=genai.Client,
+        openai_model_type=OpenAIModel,
+        openai_client_type=openai.AsyncOpenAI,
         boto_session_type=boto3.Session,
         boto_config_type=BotoConfig,
         base_model_type=BaseModel,

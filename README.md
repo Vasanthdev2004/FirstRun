@@ -171,7 +171,7 @@ as described here.
 | Controller-owned functional acceptance probe | **Implemented; passed live** |
 | Evidence, cleanup, worker quarantine on leak | **Implemented; passed live** |
 | Strands repair loop + capability broker | **Implemented; offline-tested** |
-| Selectable model provider — Bedrock, Bedrock Mantle, Anthropic, Gemini | **Implemented and tested**; each path fails closed without its credentials |
+| Selectable model provider — Bedrock, Bedrock Mantle, Anthropic, Gemini, OpenCode Zen | **Implemented and tested**; each path fails closed without its credentials |
 | GitHub App workflow — webhook, dedupe, PR/check publisher | **Implemented; offline-tested** |
 | Authenticated web app (Next.js) | **Implemented; offline-tested** |
 | Live agent run | **See "Model providers" below** |
@@ -197,6 +197,7 @@ against a pinned origin before the agent is constructed.
 | `amazon-bedrock-mantle` | `bedrock-mantle.<region>.api.aws` — Bedrock's Anthropic-messages endpoint | Named AWS profile, SigV4 |
 | `anthropic` | `api.anthropic.com` | Path to a key file; the key is never an argument |
 | `gemini` | `generativelanguage.googleapis.com` | Path to a key file; the key is never an argument |
+| `opencode-zen` | `opencode.ai/zen/v1` — OpenAI-compatible gateway with no-card free models | Path to a key file; the key is never an argument |
 
 **Honest status on the demo account.** Every `bedrock-runtime` invocation on the
 account used for this submission returns `ValidationException: Operation not allowed` —
@@ -269,6 +270,10 @@ uv run --frozen python -I -m firstrun repair-local --repo fixtures/notes-app --p
 
 ```bash
 uv run --frozen python -I -m firstrun repair-local --repo fixtures/notes-app --provider gemini --api-key-file .local/gemini.key --model-id gemini-2.5-flash --acknowledge-provider-cost --confirm-verified-temporary-non-root-credentials
+```
+
+```bash
+uv run --frozen python -I -m firstrun repair-local --repo fixtures/notes-app --provider opencode-zen --api-key-file .local/opencode.key --model-id <free-model-id> --acknowledge-provider-cost --confirm-verified-temporary-non-root-credentials
 ```
 
 Further setup: `docs/GITHUB_SETUP.md` and `docs/WEB_SETUP.md`.

@@ -126,7 +126,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     repair.add_argument(
         "--provider",
-        choices=("amazon-bedrock", "amazon-bedrock-mantle", "anthropic", "gemini"),
+        choices=(
+            "amazon-bedrock",
+            "amazon-bedrock-mantle",
+            "anthropic",
+            "gemini",
+            "opencode-zen",
+        ),
         default="amazon-bedrock",
         help="provider that serves the Strands agent's model",
     )

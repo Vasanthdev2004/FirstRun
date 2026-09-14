@@ -13,6 +13,7 @@ from firstrun.agent.strands import (
     _validated_anthropic_endpoint,
     _validated_gemini_endpoint,
     _validated_mantle_endpoint,
+    _validated_opencode_endpoint,
 )
 from firstrun.domain.repair import RepairProviderConfig
 
@@ -57,7 +58,7 @@ class RepairProviderSelectionTests(unittest.TestCase):
                 )
 
     def test_api_key_providers_require_key_path_and_reject_aws_fields(self) -> None:
-        for provider in ("anthropic", "gemini"):
+        for provider in ("anthropic", "gemini", "opencode-zen"):
             with self.subTest(provider=provider):
                 with self.assertRaises(ValidationError):
                     _config(provider_id=provider)
@@ -204,6 +205,28 @@ class ProviderEndpointValidationTests(unittest.TestCase):
         # A client whose layout cannot be read is refused, never trusted.
         with self.assertRaises(ValueError):
             _validated_gemini_endpoint(SimpleNamespace())
+
+    def test_opencode_endpoint_must_be_the_pinned_gateway_origin(self) -> None:
+        self.assertEqual(
+            "https://opencode.ai/zen/v1",
+            _validated_opencode_endpoint(
+                SimpleNamespace(base_url="https://opencode.ai/zen/v1/")
+            ),
+        )
+        bad = (
+            "http://opencode.ai/zen/v1/",
+            "https://opencode.ai/",
+            "https://opencode.ai/other/v1/",
+            "https://opencode.ai.evil.example/zen/v1/",
+            "https://opencode.ai:8443/zen/v1/",
+            "https://opencode.ai/zen/v1/?proxy=1",
+            "https://api.openai.com/v1/",
+            "",
+            None,
+        )
+        for endpoint in bad:
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
+                _validated_opencode_endpoint(SimpleNamespace(base_url=endpoint))
 
 
 if __name__ == "__main__":

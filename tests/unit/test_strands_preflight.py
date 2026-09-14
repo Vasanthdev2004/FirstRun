@@ -563,6 +563,8 @@ class StrandsPreflightTests(unittest.TestCase):
             mantle_client_type=None,
             gemini_model_type=None,
             genai_client_type=None,
+            openai_model_type=None,
+            openai_client_type=None,
             boto_session_type=fake_session,
             boto_config_type=fake_boto_config,
             base_model_type=FakeBaseModel,

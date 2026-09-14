@@ -106,7 +106,11 @@ class RepairProviderConfig(_FrozenRepairModel):
     """Explicit provider selection and controller-owned M2 budgets."""
 
     provider_id: Literal[
-        "amazon-bedrock", "amazon-bedrock-mantle", "anthropic", "gemini"
+        "amazon-bedrock",
+        "amazon-bedrock-mantle",
+        "anthropic",
+        "gemini",
+        "opencode-zen",
     ] = "amazon-bedrock"
     aws_profile: (
         Annotated[
@@ -133,7 +137,8 @@ class RepairProviderConfig(_FrozenRepairModel):
     ) = None
     # The key itself is never a configuration value. Only a path to a file the
     # operator controls is accepted, matching the GitHub App key/secret handling.
-    # Used by the API-key providers (anthropic, gemini); AWS providers reject it.
+    # Used by the API-key providers (anthropic, gemini, opencode-zen); AWS
+    # providers reject it.
     api_key_path: Path | None = None
     model_id: ProviderText
     provider_cost_acknowledged: bool

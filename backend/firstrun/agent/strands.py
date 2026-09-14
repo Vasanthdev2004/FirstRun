@@ -43,6 +43,8 @@ _MAX_WORKER_MESSAGE_BYTES = 65_536
 _MAX_API_KEY_BYTES = 512
 _ANTHROPIC_HOST = "api.anthropic.com"
 _GEMINI_HOST = "generativelanguage.googleapis.com"
+_OPENCODE_ZEN_HOST = "opencode.ai"
+_OPENCODE_ZEN_BASE_URL = "https://opencode.ai/zen/v1"
 _API_KEY = re.compile(r"^[A-Za-z0-9_\-]{32,400}$")
 
 
@@ -348,6 +350,24 @@ async def _invoke_repair_with_strands(
             },
         )
         provider_endpoint = _validated_gemini_endpoint(client)
+    elif config.provider_id == "opencode-zen":
+        # OpenAI-compatible gateway. The base URL is a controller constant, never
+        # configuration, so the credentialed client cannot be pointed elsewhere.
+        client = dependencies.openai_client_type(
+            api_key=_read_provider_api_key(config.api_key_path),
+            base_url=_OPENCODE_ZEN_BASE_URL,
+            timeout=float(config.read_timeout_seconds),
+            max_retries=config.provider_total_attempts - 1,
+        )
+        provider_endpoint = _validated_opencode_endpoint(client)
+        model = dependencies.openai_model_type(
+            client=client,
+            model_id=config.model_id,
+            params={
+                "temperature": 0,
+                "max_tokens": config.max_output_tokens_per_attempt,
+            },
+        )
     else:
         boto_session = dependencies.boto_session_type(
             profile_name=config.aws_profile,
@@ -591,6 +611,23 @@ def _validated_mantle_endpoint(model: Any, region: str) -> str:
     ):
         raise ValueError("provider endpoint is not the expected Bedrock Mantle origin")
     return f"https://{expected_host}"
+
+
+def _validated_opencode_endpoint(client: Any) -> str:
+    """Confirm the OpenAI-compatible client targets the pinned OpenCode Zen origin."""
+
+    endpoint = str(getattr(client, "base_url", "") or "")
+    parsed = urlsplit(endpoint)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != _OPENCODE_ZEN_HOST
+        or parsed.port not in (None, 443)
+        or not parsed.path.startswith("/zen/v1")
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("provider endpoint is not the pinned OpenCode Zen origin")
+    return _OPENCODE_ZEN_BASE_URL
 
 
 def _validated_gemini_endpoint(client: Any) -> str:

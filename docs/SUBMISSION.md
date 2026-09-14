@@ -92,8 +92,9 @@ missing migration step and the controller proving it in a fresh container">>`.
 account-level hold on the `bedrock-runtime` data plane: every invocation returns
 `ValidationException: Operation not allowed` regardless of model, region, or identity,
 with a support case open since September 11. Rather than fake it, we made the model
-provider selectable — Amazon Bedrock, Bedrock's Mantle endpoint, Anthropic direct, or
-Google Gemini — with the endpoint pinned and validated on each path. The recorded run uses
+provider selectable — Amazon Bedrock, Bedrock's Mantle endpoint, Anthropic direct,
+Google Gemini, or the OpenCode Zen gateway — with the endpoint pinned and validated on
+each path. The recorded run uses
 `<<PROVIDER_USED>>`. One flag switches providers; nothing else in the run changes.
 
 **What's next.** Live GitHub App activation on a demo repository, the web workspace
