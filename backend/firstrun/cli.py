@@ -124,8 +124,28 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="exact path of the controller-approved fixture repository",
     )
-    repair.add_argument("--aws-profile", required=True)
-    repair.add_argument("--region", required=True)
+    repair.add_argument(
+        "--provider",
+        choices=("amazon-bedrock", "amazon-bedrock-mantle", "anthropic"),
+        default="amazon-bedrock",
+        help="provider that serves the Strands agent's model",
+    )
+    repair.add_argument(
+        "--aws-profile",
+        help="named AWS profile; required for --provider amazon-bedrock",
+    )
+    repair.add_argument(
+        "--region",
+        help="exact AWS region; required for --provider amazon-bedrock",
+    )
+    repair.add_argument(
+        "--anthropic-api-key-file",
+        type=Path,
+        help=(
+            "path to a file containing the Anthropic API key; required for "
+            "--provider anthropic. The key is never passed as an argument."
+        ),
+    )
     repair.add_argument("--model-id", required=True)
     repair.add_argument(
         "--acknowledge-provider-cost",
@@ -262,8 +282,10 @@ def run(argv: Sequence[str] | None = None) -> int:
     if args.command == "repair-local":
         try:
             provider_config = RepairProviderConfig(
+                provider_id=args.provider,
                 aws_profile=args.aws_profile,
                 region=args.region,
+                anthropic_api_key_path=args.anthropic_api_key_file,
                 model_id=args.model_id,
                 provider_cost_acknowledged=args.acknowledge_provider_cost,
                 credential_identity_verified=(

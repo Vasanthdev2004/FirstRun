@@ -36,6 +36,7 @@ _LOCKED_DISTRIBUTIONS = {
     "boto3": ("boto3", "1.43.91"),
     "botocore": ("botocore", "1.43.91"),
     "pydantic": ("pydantic", "2.13.5"),
+    "anthropic": ("anthropic", "1.5.0"),
 }
 
 _MAX_WALL_TIME_SECONDS = 120.0
@@ -185,6 +186,8 @@ class _StrandsUnavailable(RuntimeError):
 class _StrandsDependencies:
     agent_type: Any
     bedrock_model_type: Any
+    anthropic_model_type: Any
+    mantle_client_type: Any
     boto_session_type: Any
     boto_config_type: Any
     base_model_type: Any
@@ -877,6 +880,7 @@ def _load_strands_dependencies() -> _StrandsDependencies:
         raise _StrandsUnavailable("strands_dependency_missing", None)
 
     try:
+        import anthropic
         import boto3
         import botocore
         import pydantic
@@ -885,6 +889,8 @@ def _load_strands_dependencies() -> _StrandsDependencies:
         from pydantic import BaseModel, Field
         from strands import Agent, tool
         from strands.models import BedrockModel
+        from anthropic import AsyncAnthropicBedrockMantle
+        from strands.models.anthropic import AnthropicModel
         from strands.types.exceptions import StructuredOutputException
     except ImportError as exc:
         raise _StrandsUnavailable("strands_dependency_missing", sdk_version) from exc
@@ -894,6 +900,7 @@ def _load_strands_dependencies() -> _StrandsDependencies:
         ("boto3", boto3),
         ("botocore", botocore),
         ("pydantic", pydantic),
+        ("anthropic", anthropic),
     ):
         module_file = getattr(imported_module, "__file__", None)
         if (
@@ -905,6 +912,8 @@ def _load_strands_dependencies() -> _StrandsDependencies:
     return _StrandsDependencies(
         agent_type=Agent,
         bedrock_model_type=BedrockModel,
+        anthropic_model_type=AnthropicModel,
+        mantle_client_type=AsyncAnthropicBedrockMantle,
         boto_session_type=boto3.Session,
         boto_config_type=BotoConfig,
         base_model_type=BaseModel,

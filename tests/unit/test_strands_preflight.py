@@ -557,6 +557,10 @@ class StrandsPreflightTests(unittest.TestCase):
         dependencies = _StrandsDependencies(
             agent_type=FakeAgent,
             bedrock_model_type=fake_model,
+            # This preflight path is Bedrock-only; a usable Anthropic model type
+            # here would let a wiring regression pass unnoticed.
+            anthropic_model_type=None,
+            mantle_client_type=None,
             boto_session_type=fake_session,
             boto_config_type=fake_boto_config,
             base_model_type=FakeBaseModel,

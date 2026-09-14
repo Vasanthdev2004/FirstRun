@@ -5,11 +5,16 @@ from __future__ import annotations
 import asyncio
 import json
 import multiprocessing
+import os
+import re
 import secrets
+import stat
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 from firstrun.agent.capabilities import (
     CapabilityProtocolError,
@@ -35,6 +40,9 @@ from firstrun.preflight.strands import (
 
 
 _MAX_WORKER_MESSAGE_BYTES = 65_536
+_MAX_API_KEY_BYTES = 512
+_ANTHROPIC_HOST = "api.anthropic.com"
+_API_KEY = re.compile(r"^[A-Za-z0-9_\-]{32,400}$")
 
 
 @dataclass(frozen=True)
@@ -294,27 +302,58 @@ async def _invoke_repair_with_strands(
     def run_diagnostic(script_name: str) -> str:
         return rpc("run_diagnostic", {"script_name": script_name})
 
-    boto_session = dependencies.boto_session_type(
-        profile_name=config.aws_profile,
-        region_name=config.region,
-    )
-    boto_config = dependencies.boto_config_type(
-        connect_timeout=config.connect_timeout_seconds,
-        read_timeout=config.read_timeout_seconds,
-        ignore_configured_endpoint_urls=True,
-        use_dualstack_endpoint=False,
-        use_fips_endpoint=False,
-        retries={"mode": "standard", "total_max_attempts": config.provider_total_attempts},
-    )
-    model = dependencies.bedrock_model_type(
-        model_id=config.model_id,
-        boto_session=boto_session,
-        streaming=False,
-        temperature=0,
-        max_tokens=config.max_output_tokens_per_attempt,
-        boto_client_config=boto_config,
-    )
-    provider_endpoint = _validated_bedrock_endpoint(model, config.region)
+    if config.provider_id == "amazon-bedrock-mantle":
+        # Bedrock's Anthropic-messages endpoint. Strands' AnthropicModel always
+        # builds a direct api.anthropic.com client, so the SigV4 Bedrock client
+        # replaces it after construction. No API key exists on this path; the
+        # request is signed with the operator's named AWS profile.
+        model = dependencies.anthropic_model_type(
+            client_args={"api_key": "unused-replaced-by-sigv4-client"},
+            model_id=config.model_id,
+            max_tokens=config.max_output_tokens_per_attempt,
+            params={"temperature": 0},
+        )
+        model.client = dependencies.mantle_client_type(
+            aws_profile=config.aws_profile,
+            aws_region=config.region,
+            timeout=float(config.read_timeout_seconds),
+            max_retries=config.provider_total_attempts - 1,
+        )
+        provider_endpoint = _validated_mantle_endpoint(model, config.region)
+    elif config.provider_id == "anthropic":
+        model = dependencies.anthropic_model_type(
+            client_args={
+                "api_key": _read_provider_api_key(config.anthropic_api_key_path),
+                "timeout": float(config.read_timeout_seconds),
+                "max_retries": config.provider_total_attempts - 1,
+            },
+            model_id=config.model_id,
+            max_tokens=config.max_output_tokens_per_attempt,
+            params={"temperature": 0},
+        )
+        provider_endpoint = _validated_anthropic_endpoint(model)
+    else:
+        boto_session = dependencies.boto_session_type(
+            profile_name=config.aws_profile,
+            region_name=config.region,
+        )
+        boto_config = dependencies.boto_config_type(
+            connect_timeout=config.connect_timeout_seconds,
+            read_timeout=config.read_timeout_seconds,
+            ignore_configured_endpoint_urls=True,
+            use_dualstack_endpoint=False,
+            use_fips_endpoint=False,
+            retries={"mode": "standard", "total_max_attempts": config.provider_total_attempts},
+        )
+        model = dependencies.bedrock_model_type(
+            model_id=config.model_id,
+            boto_session=boto_session,
+            streaming=False,
+            temperature=0,
+            max_tokens=config.max_output_tokens_per_attempt,
+            boto_client_config=boto_config,
+        )
+        provider_endpoint = _validated_bedrock_endpoint(model, config.region)
     agent = dependencies.agent_type(
         model=model,
         tools=[
@@ -474,6 +513,85 @@ def _parse_worker_result(
         model_cycles=counts[3],
         message="The live Strands repair agent returned a typed decision.",
     )
+
+
+def _read_provider_api_key(path: Any) -> str:
+    """Read one bounded provider key from a regular operator-controlled file.
+
+    Runs only inside the credentialed child.  The key value is never a
+    configuration field, never crosses the capability pipe, and never appears in
+    evidence; only the operator's path does.
+    """
+
+    if path is None:
+        raise ValueError("provider API key path is required")
+    candidate = Path(path)
+    try:
+        before = os.lstat(candidate)
+    except OSError as exc:
+        raise ValueError("provider API key file is unavailable") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise ValueError("provider API key must be a regular non-symlink file")
+    if not 1 <= before.st_size <= _MAX_API_KEY_BYTES:
+        raise ValueError("provider API key file is empty or exceeds its limit")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(candidate, flags)
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (before.st_dev, before.st_ino) != (
+            opened.st_dev,
+            opened.st_ino,
+        ):
+            raise ValueError("provider API key file changed while it was opened")
+        raw = os.read(descriptor, _MAX_API_KEY_BYTES + 1)
+    except OSError as exc:
+        raise ValueError("provider API key file is unavailable") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    try:
+        key = raw.decode("ascii", errors="strict").strip()
+    except UnicodeDecodeError as exc:
+        raise ValueError("provider API key is not ASCII") from exc
+    if _API_KEY.fullmatch(key) is None:
+        raise ValueError("provider API key does not have the expected shape")
+    return key
+
+
+def _validated_mantle_endpoint(model: Any, region: str) -> str:
+    """Confirm the SigV4 client targets this case's exact Bedrock Mantle origin."""
+
+    client = getattr(model, "client", None)
+    endpoint = str(getattr(client, "base_url", "") or "")
+    parsed = urlsplit(endpoint)
+    expected_host = f"bedrock-mantle.{region}.api.aws"
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != expected_host
+        or parsed.port not in (None, 443)
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("provider endpoint is not the expected Bedrock Mantle origin")
+    return f"https://{expected_host}"
+
+
+def _validated_anthropic_endpoint(model: Any) -> str:
+    """Confirm the credentialed client targets the canonical Anthropic origin."""
+
+    client = getattr(model, "client", None)
+    endpoint = str(getattr(client, "base_url", "") or "")
+    parsed = urlsplit(endpoint)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != _ANTHROPIC_HOST
+        or parsed.port not in (None, 443)
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("provider endpoint is not the canonical Anthropic origin")
+    return f"https://{_ANTHROPIC_HOST}"
 
 
 def _safe_send(connection: Any, value: object) -> None:

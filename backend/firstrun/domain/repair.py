@@ -7,6 +7,7 @@ input to controller-side policy checks and an independent proof.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated, Any, Literal, Self, TypeAlias
 
 from pydantic import (
@@ -104,24 +105,35 @@ class _FrozenRepairModel(BaseModel):
 class RepairProviderConfig(_FrozenRepairModel):
     """Explicit provider selection and controller-owned M2 budgets."""
 
-    provider_id: Literal["amazon-bedrock"] = "amazon-bedrock"
-    aws_profile: Annotated[
-        str,
-        StringConstraints(
-            strict=True,
-            min_length=1,
-            max_length=256,
-            pattern=r"^[^\x00\r\n]+$",
-        ),
-    ]
-    region: Annotated[
-        str,
-        StringConstraints(
-            strict=True,
-            max_length=128,
-            pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)+-[0-9]+$",
-        ),
-    ]
+    provider_id: Literal[
+        "amazon-bedrock", "amazon-bedrock-mantle", "anthropic"
+    ] = "amazon-bedrock"
+    aws_profile: (
+        Annotated[
+            str,
+            StringConstraints(
+                strict=True,
+                min_length=1,
+                max_length=256,
+                pattern=r"^[^\x00\r\n]+$",
+            ),
+        ]
+        | None
+    ) = None
+    region: (
+        Annotated[
+            str,
+            StringConstraints(
+                strict=True,
+                max_length=128,
+                pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)+-[0-9]+$",
+            ),
+        ]
+        | None
+    ) = None
+    # The key itself is never a configuration value. Only a path to a file the
+    # operator controls is accepted, matching the GitHub App key/secret handling.
+    anthropic_api_key_path: Path | None = None
     model_id: ProviderText
     provider_cost_acknowledged: bool
     credential_identity_verified: bool
@@ -165,6 +177,28 @@ class RepairProviderConfig(_FrozenRepairModel):
         int, Field(strict=True, ge=1, le=120)
     ] = 60
     provider_total_attempts: Annotated[int, Field(strict=True, ge=1, le=2)] = 2
+
+    @model_validator(mode="after")
+    def provider_selection_is_complete(self) -> Self:
+        """Require exactly the credentials the selected provider actually uses.
+
+        Each provider rejects the other's fields outright so a stale Bedrock
+        profile cannot sit unnoticed in an Anthropic configuration, or vice versa.
+        """
+
+        if self.provider_id in {"amazon-bedrock", "amazon-bedrock-mantle"}:
+            if self.aws_profile is None or self.region is None:
+                raise ValueError(f"{self.provider_id} requires aws_profile and region")
+            if self.anthropic_api_key_path is not None:
+                raise ValueError(
+                    f"anthropic_api_key_path is not valid for {self.provider_id}"
+                )
+            return self
+        if self.anthropic_api_key_path is None:
+            raise ValueError("anthropic requires anthropic_api_key_path")
+        if self.aws_profile is not None or self.region is not None:
+            raise ValueError("aws_profile and region are not valid for anthropic")
+        return self
 
     @model_validator(mode="after")
     def budgets_are_coherent(self) -> Self:
