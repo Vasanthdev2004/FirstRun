@@ -171,16 +171,16 @@ as described here.
 | Controller-owned functional acceptance probe | **Implemented; passed live** |
 | Evidence, cleanup, worker quarantine on leak | **Implemented; passed live** |
 | Strands repair loop + capability broker | **Implemented; offline-tested** |
-| Selectable model provider — Bedrock, Bedrock Mantle, Anthropic | **Implemented and tested**; each path fails closed without its credentials |
+| Selectable model provider — Bedrock, Bedrock Mantle, Anthropic, Gemini | **Implemented and tested**; each path fails closed without its credentials |
 | GitHub App workflow — webhook, dedupe, PR/check publisher | **Implemented; offline-tested** |
 | Authenticated web app (Next.js) | **Implemented; offline-tested** |
 | Live agent run | **See "Model providers" below** |
 | Hosted deployment | **Not implemented** |
 
-**Test suite:** 199 tests pass offline (6 live-Docker tests are gated behind
-`FIRSTRUN_RUN_LIVE_M1=1`; one symlink assertion skips on Windows). The full live gate —
-all 199 with the Docker tests enabled, zero skips on Linux-capable hosts — passed on
-September 14 at commit `fe1ef55`.
+**Test suite:** 200 tests pass offline (6 live-Docker tests are gated behind
+`FIRSTRUN_RUN_LIVE_M1=1`; one symlink assertion skips on Windows). The full live gate
+with the Docker tests enabled — 187 tests at the time, zero skips — passed on
+September 13 at commit `fe1ef55`.
 
 ---
 
@@ -196,6 +196,7 @@ against a pinned origin before the agent is constructed.
 | `amazon-bedrock` (default) | `bedrock-runtime.<region>.amazonaws.com` | Named AWS profile |
 | `amazon-bedrock-mantle` | `bedrock-mantle.<region>.api.aws` — Bedrock's Anthropic-messages endpoint | Named AWS profile, SigV4 |
 | `anthropic` | `api.anthropic.com` | Path to a key file; the key is never an argument |
+| `gemini` | `generativelanguage.googleapis.com` | Path to a key file; the key is never an argument |
 
 **Honest status on the demo account.** Every `bedrock-runtime` invocation on the
 account used for this submission returns `ValidationException: Operation not allowed` —
@@ -259,11 +260,15 @@ Through Bedrock's Mantle endpoint (same AWS profile, Anthropic model IDs):
 uv run --frozen python -I -m firstrun repair-local --repo fixtures/notes-app --provider amazon-bedrock-mantle --aws-profile <profile> --region us-east-1 --model-id anthropic.claude-opus-5 --acknowledge-provider-cost --confirm-verified-temporary-non-root-credentials
 ```
 
-Through the Anthropic API directly. The key lives in a file you control — `.local/` is
+Through an API-key provider. The key lives in a file you control — `.local/` is
 gitignored — and is never passed on the command line:
 
 ```bash
-uv run --frozen python -I -m firstrun repair-local --repo fixtures/notes-app --provider anthropic --anthropic-api-key-file .local/anthropic.key --model-id claude-opus-5 --acknowledge-provider-cost --confirm-verified-temporary-non-root-credentials
+uv run --frozen python -I -m firstrun repair-local --repo fixtures/notes-app --provider anthropic --api-key-file .local/anthropic.key --model-id claude-opus-5 --acknowledge-provider-cost --confirm-verified-temporary-non-root-credentials
+```
+
+```bash
+uv run --frozen python -I -m firstrun repair-local --repo fixtures/notes-app --provider gemini --api-key-file .local/gemini.key --model-id gemini-2.5-flash --acknowledge-provider-cost --confirm-verified-temporary-non-root-credentials
 ```
 
 Further setup: `docs/GITHUB_SETUP.md` and `docs/WEB_SETUP.md`.

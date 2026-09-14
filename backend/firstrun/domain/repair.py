@@ -106,7 +106,7 @@ class RepairProviderConfig(_FrozenRepairModel):
     """Explicit provider selection and controller-owned M2 budgets."""
 
     provider_id: Literal[
-        "amazon-bedrock", "amazon-bedrock-mantle", "anthropic"
+        "amazon-bedrock", "amazon-bedrock-mantle", "anthropic", "gemini"
     ] = "amazon-bedrock"
     aws_profile: (
         Annotated[
@@ -133,7 +133,8 @@ class RepairProviderConfig(_FrozenRepairModel):
     ) = None
     # The key itself is never a configuration value. Only a path to a file the
     # operator controls is accepted, matching the GitHub App key/secret handling.
-    anthropic_api_key_path: Path | None = None
+    # Used by the API-key providers (anthropic, gemini); AWS providers reject it.
+    api_key_path: Path | None = None
     model_id: ProviderText
     provider_cost_acknowledged: bool
     credential_identity_verified: bool
@@ -189,15 +190,15 @@ class RepairProviderConfig(_FrozenRepairModel):
         if self.provider_id in {"amazon-bedrock", "amazon-bedrock-mantle"}:
             if self.aws_profile is None or self.region is None:
                 raise ValueError(f"{self.provider_id} requires aws_profile and region")
-            if self.anthropic_api_key_path is not None:
-                raise ValueError(
-                    f"anthropic_api_key_path is not valid for {self.provider_id}"
-                )
+            if self.api_key_path is not None:
+                raise ValueError(f"api_key_path is not valid for {self.provider_id}")
             return self
-        if self.anthropic_api_key_path is None:
-            raise ValueError("anthropic requires anthropic_api_key_path")
+        if self.api_key_path is None:
+            raise ValueError(f"{self.provider_id} requires api_key_path")
         if self.aws_profile is not None or self.region is not None:
-            raise ValueError("aws_profile and region are not valid for anthropic")
+            raise ValueError(
+                f"aws_profile and region are not valid for {self.provider_id}"
+            )
         return self
 
     @model_validator(mode="after")

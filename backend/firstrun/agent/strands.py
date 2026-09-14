@@ -42,6 +42,7 @@ from firstrun.preflight.strands import (
 _MAX_WORKER_MESSAGE_BYTES = 65_536
 _MAX_API_KEY_BYTES = 512
 _ANTHROPIC_HOST = "api.anthropic.com"
+_GEMINI_HOST = "generativelanguage.googleapis.com"
 _API_KEY = re.compile(r"^[A-Za-z0-9_\-]{32,400}$")
 
 
@@ -323,7 +324,7 @@ async def _invoke_repair_with_strands(
     elif config.provider_id == "anthropic":
         model = dependencies.anthropic_model_type(
             client_args={
-                "api_key": _read_provider_api_key(config.anthropic_api_key_path),
+                "api_key": _read_provider_api_key(config.api_key_path),
                 "timeout": float(config.read_timeout_seconds),
                 "max_retries": config.provider_total_attempts - 1,
             },
@@ -332,6 +333,21 @@ async def _invoke_repair_with_strands(
             params={"temperature": 0},
         )
         provider_endpoint = _validated_anthropic_endpoint(model)
+    elif config.provider_id == "gemini":
+        # The client is built here rather than inside GeminiModel so the origin
+        # it will sign requests to can be checked before the agent exists.
+        client = dependencies.genai_client_type(
+            api_key=_read_provider_api_key(config.api_key_path)
+        )
+        model = dependencies.gemini_model_type(
+            client=client,
+            model_id=config.model_id,
+            params={
+                "temperature": 0,
+                "max_output_tokens": config.max_output_tokens_per_attempt,
+            },
+        )
+        provider_endpoint = _validated_gemini_endpoint(client)
     else:
         boto_session = dependencies.boto_session_type(
             profile_name=config.aws_profile,
@@ -575,6 +591,27 @@ def _validated_mantle_endpoint(model: Any, region: str) -> str:
     ):
         raise ValueError("provider endpoint is not the expected Bedrock Mantle origin")
     return f"https://{expected_host}"
+
+
+def _validated_gemini_endpoint(client: Any) -> str:
+    """Confirm the Gemini client targets the canonical Google AI origin.
+
+    The resolved base URL lives on the SDK's private API client; if it cannot be
+    read, the provider is refused rather than trusted.
+    """
+
+    options = getattr(getattr(client, "_api_client", None), "_http_options", None)
+    endpoint = str(getattr(options, "base_url", "") or "")
+    parsed = urlsplit(endpoint)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != _GEMINI_HOST
+        or parsed.port not in (None, 443)
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("provider endpoint is not the canonical Gemini origin")
+    return f"https://{_GEMINI_HOST}"
 
 
 def _validated_anthropic_endpoint(model: Any) -> str:

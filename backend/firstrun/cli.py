@@ -126,7 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     repair.add_argument(
         "--provider",
-        choices=("amazon-bedrock", "amazon-bedrock-mantle", "anthropic"),
+        choices=("amazon-bedrock", "amazon-bedrock-mantle", "anthropic", "gemini"),
         default="amazon-bedrock",
         help="provider that serves the Strands agent's model",
     )
@@ -139,11 +139,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="exact AWS region; required for --provider amazon-bedrock",
     )
     repair.add_argument(
-        "--anthropic-api-key-file",
+        "--api-key-file",
         type=Path,
         help=(
-            "path to a file containing the Anthropic API key; required for "
-            "--provider anthropic. The key is never passed as an argument."
+            "path to a file containing the provider API key; required for "
+            "--provider anthropic or gemini. The key is never passed as an argument."
         ),
     )
     repair.add_argument("--model-id", required=True)
@@ -285,7 +285,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                 provider_id=args.provider,
                 aws_profile=args.aws_profile,
                 region=args.region,
-                anthropic_api_key_path=args.anthropic_api_key_file,
+                api_key_path=args.api_key_file,
                 model_id=args.model_id,
                 provider_cost_acknowledged=args.acknowledge_provider_cost,
                 credential_identity_verified=(

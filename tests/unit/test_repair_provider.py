@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from firstrun.agent.strands import (
     _read_provider_api_key,
     _validated_anthropic_endpoint,
+    _validated_gemini_endpoint,
     _validated_mantle_endpoint,
 )
 from firstrun.domain.repair import RepairProviderConfig
@@ -31,7 +32,7 @@ class RepairProviderSelectionTests(unittest.TestCase):
         config = _config(aws_profile="firstrun", region="us-east-1")
 
         self.assertEqual("amazon-bedrock", config.provider_id)
-        self.assertIsNone(config.anthropic_api_key_path)
+        self.assertIsNone(config.api_key_path)
 
     def test_bedrock_providers_require_profile_and_region(self) -> None:
         for provider in ("amazon-bedrock", "amazon-bedrock-mantle"):
@@ -52,28 +53,29 @@ class RepairProviderSelectionTests(unittest.TestCase):
                     provider_id=provider,
                     aws_profile="firstrun",
                     region="us-east-1",
-                    anthropic_api_key_path=Path("key.txt"),
+                    api_key_path=Path("key.txt"),
                 )
 
-    def test_anthropic_requires_key_path_and_rejects_aws_fields(self) -> None:
-        with self.assertRaises(ValidationError):
-            _config(provider_id="anthropic")
-        with self.assertRaises(ValidationError):
-            _config(
-                provider_id="anthropic",
-                anthropic_api_key_path=Path("key.txt"),
-                aws_profile="firstrun",
-            )
-        with self.assertRaises(ValidationError):
-            _config(
-                provider_id="anthropic",
-                anthropic_api_key_path=Path("key.txt"),
-                region="us-east-1",
-            )
-        config = _config(
-            provider_id="anthropic", anthropic_api_key_path=Path("key.txt")
-        )
-        self.assertEqual(Path("key.txt"), config.anthropic_api_key_path)
+    def test_api_key_providers_require_key_path_and_reject_aws_fields(self) -> None:
+        for provider in ("anthropic", "gemini"):
+            with self.subTest(provider=provider):
+                with self.assertRaises(ValidationError):
+                    _config(provider_id=provider)
+                with self.assertRaises(ValidationError):
+                    _config(
+                        provider_id=provider,
+                        api_key_path=Path("key.txt"),
+                        aws_profile="firstrun",
+                    )
+                with self.assertRaises(ValidationError):
+                    _config(
+                        provider_id=provider,
+                        api_key_path=Path("key.txt"),
+                        region="us-east-1",
+                    )
+                config = _config(provider_id=provider, api_key_path=Path("key.txt"))
+                self.assertEqual(provider, config.provider_id)
+                self.assertEqual(Path("key.txt"), config.api_key_path)
 
     def test_unknown_provider_is_rejected(self) -> None:
         with self.assertRaises(ValidationError):
@@ -173,6 +175,35 @@ class ProviderEndpointValidationTests(unittest.TestCase):
         for endpoint in bad:
             with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
                 _validated_anthropic_endpoint(self._model(endpoint))
+
+    @staticmethod
+    def _gemini_client(base_url: object) -> SimpleNamespace:
+        # Mirrors the google-genai 2.23.0 client layout the validator reads.
+        return SimpleNamespace(
+            _api_client=SimpleNamespace(_http_options=SimpleNamespace(base_url=base_url))
+        )
+
+    def test_gemini_endpoint_must_be_the_canonical_origin(self) -> None:
+        self.assertEqual(
+            "https://generativelanguage.googleapis.com",
+            _validated_gemini_endpoint(
+                self._gemini_client("https://generativelanguage.googleapis.com/")
+            ),
+        )
+        bad = (
+            "http://generativelanguage.googleapis.com/",
+            "https://generativelanguage.googleapis.com.evil.example/",
+            "https://generativelanguage.googleapis.com/?key=x",
+            "https://api.anthropic.com/",
+            "",
+            None,
+        )
+        for endpoint in bad:
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
+                _validated_gemini_endpoint(self._gemini_client(endpoint))
+        # A client whose layout cannot be read is refused, never trusted.
+        with self.assertRaises(ValueError):
+            _validated_gemini_endpoint(SimpleNamespace())
 
 
 if __name__ == "__main__":

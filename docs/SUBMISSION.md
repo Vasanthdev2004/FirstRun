@@ -81,8 +81,9 @@ recorded as evidence. The agent must return typed structured output — `repair_
 policy check and a fresh proof run.
 
 **What we actually proved.** The verification engine passed its full live gate with
-real Docker containers — 199 tests, including the complete baseline-fails /
-repair-proves cycle, freshness marker checks, and protected-input rejection. The
+real Docker containers on September 13 — 187 tests at the time, zero skips, including
+the complete baseline-fails / repair-proves cycle, freshness marker checks, and
+protected-input rejection. The offline suite is now 200 tests. The
 recorded demonstration shows `<<DEMO_SUMMARY: e.g. "the broken fixture failing its
 functional probe while /health returns 200, then the Strands agent proposing the
 missing migration step and the controller proving it in a fresh container">>`.
@@ -91,8 +92,8 @@ missing migration step and the controller proving it in a fresh container">>`.
 account-level hold on the `bedrock-runtime` data plane: every invocation returns
 `ValidationException: Operation not allowed` regardless of model, region, or identity,
 with a support case open since September 11. Rather than fake it, we made the model
-provider selectable — Amazon Bedrock, Bedrock's Mantle endpoint, or Anthropic direct —
-with the endpoint pinned and validated on each path. The recorded run uses
+provider selectable — Amazon Bedrock, Bedrock's Mantle endpoint, Anthropic direct, or
+Google Gemini — with the endpoint pinned and validated on each path. The recorded run uses
 `<<PROVIDER_USED>>`. One flag switches providers; nothing else in the run changes.
 
 **What's next.** Live GitHub App activation on a demo repository, the web workspace

@@ -18,6 +18,7 @@ github = [
 provider = [
   "anthropic==1.5.0",
   "boto3==1.43.91",
+  "google-genai==2.23.0",
   "strands-agents==1.55.1",
 ]
 
