@@ -1,10 +1,11 @@
 # Implementation status — observed evidence only
 
-**Last authored:** 2026-09-13.
-**Current checkpoint:** the M4 implementation review is complete; it found and fixed
-two defects (`020f88c`). M2 acceptance/live provider validation, the real
-installed-App M3 workflow and live-configured M4 acceptance remain outstanding.
-Full Docker/provider/App tests are deferred, not passed.
+**Last authored:** 2026-09-14.
+**Current checkpoint:** the M1 live gate passed on current `main` (`fe1ef55`) with
+zero skips; the Strands model provider is now selectable (`e635781`) after the demo
+AWS account's `bedrock-runtime` data plane was found to be blocked at account level.
+No live agent run has been recorded yet. The real installed-App M3 workflow and
+live-configured M4 acceptance remain outstanding.
 **Product target:** web app + GitHub App; Next.js now fronts the existing trusted
 Python controller, with execution kept in the separate worker.
 
@@ -263,15 +264,88 @@ No containers were launched, no provider or AWS requests were made, no OAuth exc
 occurred, and no runtime GitHub App writes occurred during this slice. `020f88c` is
 committed locally and has not been pushed to `origin`.
 
+## Live gate on current main — September 13
+
+With Docker Desktop running on this machine, the full suite was run with the live
+Docker integration tests enabled at `fe1ef55`:
+
+- `FIRSTRUN_RUN_LIVE_M1=1 .venv\Scripts\python.exe -I -m unittest discover -s tests -p 'test_*.py'`:
+  exit 0, **187 tests, OK, zero skips**, 30.1 s. All six live Docker integration tests
+  passed. This re-establishes the M1 acceptance coverage (A01, A02, A06, A07, A08, A09,
+  A13, A14, A15, A17) on the current default-branch revision rather than only on
+  `c404d1e`.
+- `.venv\Scripts\python.exe -I -m firstrun verify-local --repo fixtures/notes-app --target fixtures/notes-app/.firstrun/target.json`:
+  exit 10 (`failed`). Source revision `fe1ef554cccc728378c41461850b9fc10688a3e8`,
+  run `449f8902-f426-4915-b619-4ce5e1f461d5`; readiness passed, functional acceptance
+  failed, cleanup passed. This is the committed fixture's intended broken baseline.
+- `.venv\Scripts\python.exe -I -m firstrun doctor`: all checks passed once Docker was
+  started; `provider: unknown` by design.
+
+## Provider blocker diagnosis — September 13–14
+
+The demo AWS account (`247670275693`, AWS India, `us-east-1`) cannot invoke any model
+through `bedrock-runtime`. Every observation below was made directly; none is inferred.
+
+- `sts get-caller-identity` succeeds for a non-root IAM user `firstrun-agent` with
+  `AmazonBedrockFullAccess`. `ListFoundationModels` returns 120 models and
+  `ListInferenceProfiles` returns 75 profiles including `global.anthropic.claude-opus-5`.
+- `Converse` and `InvokeModel` both return `ValidationException: Operation not allowed`
+  for every model tested — ten models across Amazon, OpenAI, DeepSeek, Qwen, Mistral,
+  Google, Moonshot, NVIDIA, Z.ai and MiniMax — using base IDs and inference-profile
+  IDs, in `us-east-1`, `us-west-2` and `ap-south-1`, as root and as the IAM user.
+- The result was unchanged after each of: adding a verified payment method, the
+  account-verification banner clearing, upgrading the account from the Free plan to a
+  Paid plan, and redeeming the hackathon's $50 promotional credit ($190.00 in active
+  credits, $0.00 used, including $20 issued specifically for Bedrock playground use).
+- `ap-south-1` briefly returned `AccessDeniedException: Your account is currently being
+  verified` before reverting to `Operation not allowed`.
+- An AWS expert-accepted re:Post answer to an identical report describes an account-level
+  anti-fraud hold on the `bedrock-runtime` data plane that is not exposed through any
+  API and has no self-service resolution. AWS support case `178910367900309`
+  ("Account verification pending; Bedrock access blocked", Account and billing) has
+  been open since 2026-09-11 05:14 with no correspondence from AWS.
+- The Bedrock Mantle endpoint (`bedrock-mantle.us-east-1.api.aws`, SigV4 with the same
+  profile) authenticates the account and returns ordinary Anthropic API responses rather
+  than the hold. It serves only the Anthropic messages API, and Anthropic models on it
+  return `not available for this account` until Anthropic's one-time use-case submission
+  is completed for the account. That submission was attempted in the console; the
+  console banner remained and the API result was unchanged afterwards.
+
+Promotional credits, support-plan upgrades and account-plan upgrades were each ruled
+out as fixes by direct test, not assumption. The hackathon rules and FAQ were re-read on
+September 13: Strands Agents is the required SDK; Amazon Bedrock and AgentCore are
+encouraged for scoring and explicitly not required.
+
+## Selectable provider — `e635781`
+
+`RepairProviderConfig.provider_id` selects `amazon-bedrock` (default, unchanged),
+`amazon-bedrock-mantle`, or `anthropic`. The agent, capability broker, tools, structured
+output contract and controller-owned proof are identical on every path. Each provider
+rejects the other providers' fields; each endpoint is validated against a pinned origin
+before the agent is constructed. The Anthropic key is never a configuration value or
+argument — only a path to an operator-controlled file, read inside the credentialed
+child. `anthropic==1.5.0` is added to the `provider` extra and to the preflight's
+verified-distribution set.
+
+- `.venv\Scripts\python.exe -I -m unittest discover -s tests -p 'test_*.py'`: exit 0,
+  **199 tests, 7 skipped** (6 live Docker with `FIRSTRUN_RUN_LIVE_M1` unset; 1 symlink
+  assertion that cannot run on this Windows host — the directory-rejection half of that
+  test runs).
+- `.venv\Scripts\python.exe -I -m compileall -q backend/firstrun`: exit 0.
+  `git diff --check`: exit 0. `uv lock`: resolved 56 packages.
+- `repair-local` with each of the three providers and no credentials returns
+  `policy_blocked` (exit 13).
+
+No live agent run has been recorded on any provider. The provider layer makes one
+possible; this section does not claim one.
+
 ## Next single task
 
-Unblock the provider. A03 — the Strands agent discovering the repair from tool
-evidence with no answer key — has still never executed, and it is the product's
-central claim. It requires the owner-selected AWS profile, exact region and model,
-explicit cost acknowledgement, and confirmation of independently verified temporary
-non-root credentials. Live M3 separately requires the owner-approved demo repository,
-least-privilege App/OAuth configuration and an operator-managed HTTPS webhook
-endpoint. M5 deployment needs an explicit hosting/security/spend choice before
-provisioning. Do not describe M2/M3/M4 as accepted until their outstanding real
-acceptance checks and the noted M4 cancellation gap are addressed. M5/M6 have not
-been scaffolded.
+Record one live agent run — A03, the Strands agent discovering the repair from tool
+evidence with no answer key. It is the product's central claim and has never executed.
+Whichever provider serves it must be stated in the recorded demonstration and in this
+file, with the exact command and exit code. Then record the demonstration video and
+complete the Devpost submission; `docs/SUBMISSION.md` holds the description and shot
+list. Live M3 and M5 remain unscaffolded and are out of scope for the submission window.
+Do not describe M2/M3/M4 as accepted until their outstanding real acceptance checks and
+the noted M4 cancellation gap are addressed.

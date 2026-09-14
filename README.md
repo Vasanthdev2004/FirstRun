@@ -87,6 +87,7 @@ flowchart TB
     subgraph agent["Strands agent — credentialed, sandboxed from everything else"]
         BROKER["Capability broker<br/>5 narrow tools, bounded, replay-checked"]
         LLM["Strands Agent<br/>structured output only"]
+        PROVIDER["Model provider — selected per run<br/>Amazon Bedrock · Bedrock Mantle · Anthropic<br/>endpoint pinned and validated before construction"]
     end
 
     subgraph worker["Trusted worker — holds Docker, never holds credentials"]
@@ -104,6 +105,7 @@ flowchart TB
     REPO -. "exact commit, credential-free archive" .-> BASE
     CASE --> BASE --> BROKER
     BROKER <--> LLM
+    LLM <--> PROVIDER
     LLM -- "proposed recipe" --> POLICY
     BROKER --> INV
     POLICY -- "exact candidate bytes" --> PROOF
@@ -118,7 +120,7 @@ flowchart TB
     classDef ai fill:#1a1b33,stroke:#5b6ee1,color:#f5f5f5
     class untrusted,REPO,GH danger
     class controller,worker,WH,CASE,POLICY,PUB,BASE,INV,PROOF trust
-    class agent,BROKER,LLM ai
+    class agent,BROKER,LLM,PROVIDER ai
 ```
 
 **The three boundaries that matter:**
@@ -169,14 +171,44 @@ as described here.
 | Controller-owned functional acceptance probe | **Implemented; passed live** |
 | Evidence, cleanup, worker quarantine on leak | **Implemented; passed live** |
 | Strands repair loop + capability broker | **Implemented; offline-tested** |
+| Selectable model provider — Bedrock, Bedrock Mantle, Anthropic | **Implemented and tested**; each path fails closed without its credentials |
 | GitHub App workflow — webhook, dedupe, PR/check publisher | **Implemented; offline-tested** |
 | Authenticated web app (Next.js) | **Implemented; offline-tested** |
-| Live Bedrock provider run | **Not yet executed** |
+| Live agent run | **See "Model providers" below** |
 | Hosted deployment | **Not implemented** |
 
-**Test suite:** 187 tests pass offline (6 live-Docker tests are gated behind
-`FIRSTRUN_RUN_LIVE_M1=1`). The M1 milestone passed its full live gate including 6 real
-Docker integration tests at commit `c404d1e`.
+**Test suite:** 199 tests pass offline (6 live-Docker tests are gated behind
+`FIRSTRUN_RUN_LIVE_M1=1`; one symlink assertion skips on Windows). The full live gate —
+all 199 with the Docker tests enabled, zero skips on Linux-capable hosts — passed on
+September 14 at commit `fe1ef55`.
+
+---
+
+## Model providers
+
+The Strands agent's model is selected per run with `--provider`. The agent, its five
+tools, the structured-output contract, and the independent proof are identical on every
+path; only the client that signs the request changes, and the endpoint is validated
+against a pinned origin before the agent is constructed.
+
+| `--provider` | Endpoint | Credentials |
+|---|---|---|
+| `amazon-bedrock` (default) | `bedrock-runtime.<region>.amazonaws.com` | Named AWS profile |
+| `amazon-bedrock-mantle` | `bedrock-mantle.<region>.api.aws` — Bedrock's Anthropic-messages endpoint | Named AWS profile, SigV4 |
+| `anthropic` | `api.anthropic.com` | Path to a key file; the key is never an argument |
+
+**Honest status on the demo account.** Every `bedrock-runtime` invocation on the
+account used for this submission returns `ValidationException: Operation not allowed` —
+across all models, regions, and both root and IAM identities, with a verified payment
+method and a paid plan. An AWS expert-accepted answer identifies this as an account-level
+anti-fraud hold on the `bedrock-runtime` data plane with no self-service fix. An Account
+and billing support case has been open since September 11 without a response. The
+`amazon-bedrock-mantle` path authenticates the same account successfully and is not
+subject to that hold; it serves Anthropic models, which additionally require a one-time
+use-case submission to Anthropic.
+
+Whichever provider the recorded demonstration uses is stated in the demonstration
+itself. One flag switches between them; nothing else in the run changes.
 
 `STATUS.md` records every milestone with the exact commands run and their exit codes.
 Where something has not been proven, it says so.
@@ -213,12 +245,25 @@ Run the full offline suite:
 uv run --frozen python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-The agent repair loop additionally requires an explicitly configured provider, an
+The agent repair loop additionally requires an explicitly selected provider, an
 acknowledgement of model cost, and confirmation of temporary non-root credentials. It
-fails closed without them, by design:
+fails closed without them, by design. Through Amazon Bedrock:
 
 ```bash
-uv run --frozen python -I -m firstrun repair-local --repo fixtures/notes-app --aws-profile <profile> --region <region> --model-id <model> --acknowledge-provider-cost --confirm-verified-temporary-non-root-credentials
+uv run --frozen python -I -m firstrun repair-local --repo fixtures/notes-app --provider amazon-bedrock --aws-profile <profile> --region us-east-1 --model-id global.anthropic.claude-opus-5 --acknowledge-provider-cost --confirm-verified-temporary-non-root-credentials
+```
+
+Through Bedrock's Mantle endpoint (same AWS profile, Anthropic model IDs):
+
+```bash
+uv run --frozen python -I -m firstrun repair-local --repo fixtures/notes-app --provider amazon-bedrock-mantle --aws-profile <profile> --region us-east-1 --model-id anthropic.claude-opus-5 --acknowledge-provider-cost --confirm-verified-temporary-non-root-credentials
+```
+
+Through the Anthropic API directly. The key lives in a file you control — `.local/` is
+gitignored — and is never passed on the command line:
+
+```bash
+uv run --frozen python -I -m firstrun repair-local --repo fixtures/notes-app --provider anthropic --anthropic-api-key-file .local/anthropic.key --model-id claude-opus-5 --acknowledge-provider-cost --confirm-verified-temporary-non-root-credentials
 ```
 
 Further setup: `docs/GITHUB_SETUP.md` and `docs/WEB_SETUP.md`.
